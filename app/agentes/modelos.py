@@ -1,0 +1,70 @@
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from app.esquemas.entradas import Secuencia
+
+
+class Dato(BaseModel):
+    campo: str
+    valor: str | None
+    url: str
+    cita: str
+
+
+class Enriquecimiento(BaseModel):
+    resumen: str
+    datos: list[Dato]
+
+
+class EmpresaDescubierta(BaseModel):
+    razonSocial: str
+    sitioWeb: str
+    sector: str | None
+    municipio: str | None
+    correoCorporativo: str | None
+    datos: list[Dato]
+
+
+class Descubrimiento(BaseModel):
+    empresas: list[EmpresaDescubierta]
+
+
+class CampanaPropuesta(BaseModel):
+    nombre: str
+    resumen: str
+    secuencia: Secuencia
+
+
+class Clasificacion(BaseModel):
+    clasificacion: Literal[
+        "interesado",
+        "pide_informacion",
+        "quiere_reunion",
+        "objecion",
+        "ahora_no",
+        "no_interesado",
+        "baja",
+        "fuera_oficina",
+        "remite_a_otra_persona",
+        "necesita_revision",
+    ]
+    confianza: float = Field(ge=0, le=1)
+    borrador: str
+    nombres: list[str]
+    fechas: list[str]
+
+
+class SegmentoPropuesto(BaseModel):
+    nombre: str
+    justificacion: str
+    reglas: list[dict[str, str]]
+
+
+class RecomendacionPropuesta(BaseModel):
+    texto: str
+    sustento: dict[str, str | float | int]
+
+
+class Informe(BaseModel):
+    recomendaciones: list[RecomendacionPropuesta]

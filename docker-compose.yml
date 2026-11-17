@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: nexus_owner
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?Configure DB_OWNER_PASSWORD}
+      POSTGRES_DB: nexus
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus_owner -d nexus"]
+      interval: 3s
+      retries: 20
+  migrate:
+    build:
+      context: ..
+      dockerfile: nexus-publicity-manager-backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://nexus_owner:${DB_OWNER_PASSWORD}@db:5432/nexus
+    command: ["sh", "-c", "alembic upgrade head && python scripts/crear_rol.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+  app:
+    build:
+      context: ..
+      dockerfile: nexus-publicity-manager-backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://nexus_app:${DB_APP_PASSWORD}@db:5432/nexus
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  postgres:
