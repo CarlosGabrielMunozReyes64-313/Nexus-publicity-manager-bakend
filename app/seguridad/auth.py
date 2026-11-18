@@ -127,7 +127,6 @@ def iniciar(finalidad: str, admin: str | None = None) -> RedirectResponse:
         "nonce": nonce,
         "code_challenge": base64.urlsafe_b64encode(digest(verifier)).decode().rstrip("="),
         "code_challenge_method": "S256",
-        "hd": cfg.google_dominio_permitido,
     }
     if finalidad == "gmail":
         params.update(access_type="offline", prompt="consent")
@@ -196,7 +195,7 @@ def intercambio(request: Request, finalidad: str) -> tuple[dict[str, Any], dict[
     if (
         claims.get("nonce") != row["nonce"]
         or not claims.get("email_verified")
-        or claims.get("hd") != cfg.google_dominio_permitido
+        or str(claims.get("email", "")).strip().lower() != cfg.admin_correo.strip().lower()
     ):
         raise HTTPException(403, "Cuenta no autorizada")
     tokens["correo"] = claims["email"].lower()
