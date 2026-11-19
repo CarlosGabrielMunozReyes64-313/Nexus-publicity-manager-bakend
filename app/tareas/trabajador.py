@@ -93,6 +93,34 @@ def timeout(signum: int, frame: Any) -> None:
     raise TimeoutError("La tarea excedió el tiempo permitido")
 
 
+def detalle_seguro(exc: Exception) -> str:
+    import re
+
+    permitidos = {
+        "Configure los precios del proveedor para el modelo seleccionado",
+        "Entrada excede el presupuesto por tarea",
+        "Tope por tarea alcanzado; requiere revisión",
+        "Tope mensual de agentes alcanzado",
+        "La ejecución requiere revisión por costo",
+        "Configure GEMINI_API_KEY en el backend y el trabajador",
+        "GEMINI_MODELO no válido",
+        "Gemini devolvió una salida bloqueada o incompleta",
+        "Gemini no aportó fuentes de búsqueda; no se guardaron empresas",
+        "El modelo no devolvió una salida válida",
+        "Tipo de tarea no registrado",
+    }
+    texto = str(exc)
+    if isinstance(exc, ValueError) and (
+        texto in permitidos
+        or re.fullmatch(
+            r"Gemini no disponible \((?:[1-5][0-9]{2}|red)\); revise clave, cuota y modelo",
+            texto,
+        )
+    ):
+        return texto
+    return "Error no clasificado; requiere diagnóstico adicional"
+
+
 def procesar(t: db.Row) -> None:
     try:
         signal.signal(signal.SIGALRM, timeout)
@@ -110,7 +138,7 @@ def procesar(t: db.Row) -> None:
             c.execute("SELECT terminar_tarea(%s,true)", (t["id"],))
     except Exception as exc:
         # Do not log provider payloads, addresses, credentials or email bodies.
-        log.warning("tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__)
+        log.warning("tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__, detalle=detalle_seguro(exc))
         with transaccion("proceso:trabajador") as c:
             state = uno(
                 c,
