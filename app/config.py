@@ -3,7 +3,7 @@ from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,14 @@ class Config(BaseSettings):
     google_dominio_permitido: str = "nexusinnovacion.com"
     gmail_cuenta_envio: str = ""
     auth_dev_bypass: bool = False
+    agente_proveedor: Literal["claude", "gemini"] = "claude"
+    gemini_api_key: SecretStr = SecretStr("")
+    gemini_modelo: str = "gemini-3.5-flash-lite"
+    gemini_precios_json: str = '{"gemini-3.5-flash-lite":{"entrada":0.30,"salida":2.50}}'
+    gemini_costo_busqueda_usd: float = Field(default=0.014, ge=0)
+    descubrimiento_automatico: bool = False
+    descubrimiento_limite_diario: int = Field(default=20, ge=1, le=100)
+    descubrimiento_hora: int = Field(default=8, ge=0, le=23)
     anthropic_api_key: SecretStr = SecretStr("")
     claude_modelo_ligero: str = "claude-haiku-5-5"
     claude_modelo_mayor: str = "claude-sonnet-5-5"

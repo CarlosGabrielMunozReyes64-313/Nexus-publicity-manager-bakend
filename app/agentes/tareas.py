@@ -22,14 +22,19 @@ from app.esquemas.serializar import serializar
 
 def fuentes(datos_extraidos: list[Any], dominio: str | None = None) -> list[Row]:
     result = []
+    paginas: dict[str, str | None] = {}
     for d in datos_extraidos:
         urlhost = (urlsplit(d.url).hostname or "").removeprefix("www.")
         if dominio and urlhost != dominio.removeprefix("www."):
             continue
-        try:
-            comprobada = lector_web.verificar_cita(d.url, d.cita)
-        except (ValueError, OSError):
-            comprobada = False
+        if d.url not in paginas:
+            try:
+                paginas[d.url] = lector_web.normalizar(lector_web.leer(d.url))
+            except (ValueError, OSError):
+                paginas[d.url] = None
+        comprobada = bool(d.cita.strip()) and lector_web.normalizar(d.cita) in (
+            paginas[d.url] or ""
+        )
         result.append(
             {
                 "campo": d.campo,
@@ -186,7 +191,15 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
             for item in ev:
                 insertar(c, "evidencias", {"propuesta_id": prop["id"], **item})
         elif tipo == "descubrir_empresas":
-            for x in result.empresas:
+            from app.agentes.descubrimiento import corroborados, importar
+
+            automatico = bool(payload.get("autoImportar"))
+            limite = (
+                min(5, max(1, int(payload.get("limite", 5))))
+                if automatico
+                else len(result.empresas)
+            )
+            for x in result.empresas[:limite]:
                 host = urlsplit(x.sitioWeb).hostname
                 if not host:
                     continue
@@ -207,6 +220,10 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                 verified = {
                     d["campo"]: d["valor"] for d in comprobadas if d["estado"] == "verificado"
                 }
+                if automatico:
+                    verified = corroborados(comprobadas)
+                    if str(verified.get("pais", "")).casefold() != "colombia":
+                        continue
                 r = insertar(
                     c,
                     "resultados_descubrimiento",
@@ -223,6 +240,8 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                 )
                 for item in comprobadas:
                     insertar(c, "evidencias", {"resultado_id": r["id"], **item})
+                if automatico and not duplicate:
+                    importar(c, r, comprobadas)
             actualizar(
                 c,
                 "busquedas_descubrimiento",

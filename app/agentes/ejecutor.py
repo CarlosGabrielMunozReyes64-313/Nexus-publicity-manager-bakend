@@ -113,6 +113,7 @@ def costo(uso: dict[str, Any], precios: dict[str, Any]) -> float:
     total += (
         (uso.get("server_tool_use") or {}).get("web_search_requests") or 0
     ) * config().costo_busqueda_web_usd
+    total += (uso.get("gemini_search_queries") or 0) * config().gemini_costo_busqueda_usd
     return total
 
 
@@ -124,10 +125,15 @@ def ejecutar(
     ligero: bool = False,
 ) -> T:
     cfg = config()
-    model = cfg.claude_modelo_ligero if ligero else cfg.claude_modelo_mayor
-    precios = json.loads(cfg.claude_precios_json).get(model)
+    gemini = cfg.agente_proveedor == "gemini"
+    model = (
+        cfg.gemini_modelo
+        if gemini
+        else (cfg.claude_modelo_ligero if ligero else cfg.claude_modelo_mayor)
+    )
+    precios = json.loads(cfg.gemini_precios_json if gemini else cfg.claude_precios_json).get(model)
     if not precios or not precios.get("entrada") or not precios.get("salida"):
-        raise ValueError("Configure CLAUDE_PRECIOS_JSON para el modelo seleccionado")
+        raise ValueError("Configure los precios del proveedor para el modelo seleccionado")
     payload = (
         "<datos_no_confiables>"
         + json.dumps(entrada, ensure_ascii=False, default=str)
@@ -140,10 +146,13 @@ def ejecutar(
     search_reserve = 0.0
     if schema.__name__ == "Descubrimiento":
         estimate_input += 100000
-        search_reserve = 10 * cfg.costo_busqueda_web_usd
+        search_reserve = (
+            20 * cfg.gemini_costo_busqueda_usd if gemini else 10 * cfg.costo_busqueda_web_usd
+        )
     input_cost = estimate_input * float(precios["entrada"]) / 1_000_000 + search_reserve
     max_tokens = min(
-        4096, int((cfg.tope_usd_por_tarea - input_cost) * 1_000_000 / float(precios["salida"]))
+        8192 if gemini else 4096,
+        int((cfg.tope_usd_por_tarea - input_cost) * 1_000_000 / float(precios["salida"])),
     )
     if max_tokens < 64:
         raise ValueError("Entrada excede el presupuesto por tarea")
@@ -164,13 +173,14 @@ def ejecutar(
             if float(task_spent) + reserved > cfg.tope_usd_por_tarea:
                 raise ValueError("Tope por tarea alcanzado; requiere revisión")
         if float(spent) + reserved > cfg.tope_mensual_usd:
-            with transaccion("proceso:presupuesto") as warning:
-                actualizar(
-                    warning,
-                    "integraciones",
-                    "claude",
-                    {"estado": "error", "detalle": "Tope mensual de agentes alcanzado"},
-                )
+            if not gemini:
+                with transaccion("proceso:presupuesto") as warning:
+                    actualizar(
+                        warning,
+                        "integraciones",
+                        "claude",
+                        {"estado": "error", "detalle": "Tope mensual de agentes alcanzado"},
+                    )
             raise ValueError("Tope mensual de agentes alcanzado")
         prompt = uno(c, "SELECT * FROM prompts WHERE agente=%s AND activo", (agente,))
         run = insertar(
@@ -187,9 +197,10 @@ def ejecutar(
         )
     started = time.monotonic()
     try:
-        parsed, usage = (proveedor or ClaudeReal()).ejecutar(
-            model, prompt["texto"], payload, schema, max_tokens
-        )
+        from app.agentes.gemini import GeminiReal
+
+        selected = proveedor or (GeminiReal() if gemini else ClaudeReal())
+        parsed, usage = selected.ejecutar(model, prompt["texto"], payload, schema, max_tokens)
         actual = costo(usage, precios)
         with transaccion("agente:" + agente, accion="resultado_agente") as c:
             actualizar(
@@ -206,7 +217,8 @@ def ejecutar(
                     "tokens_cache_escritura": usage.get("cache_creation_input_tokens", 0),
                     "busquedas_web": (usage.get("server_tool_use") or {}).get(
                         "web_search_requests", 0
-                    ),
+                    )
+                    + usage.get("gemini_search_queries", 0),
                     "duracion_ms": int((time.monotonic() - started) * 1000),
                     "terminada_en": ahora(),
                 },
@@ -216,8 +228,8 @@ def ejecutar(
                 "costos",
                 {
                     "fecha": ahora().astimezone(BOGOTA).date(),
-                    "categoria": "api_claude",
-                    "concepto": "Ejecución " + agente,
+                    "categoria": "otro" if gemini else "api_claude",
+                    "concepto": ("Gemini: " if gemini else "Claude: ") + agente,
                     "monto": actual,
                     "moneda": "USD",
                     "ejecucion_agente_id": run["id"],

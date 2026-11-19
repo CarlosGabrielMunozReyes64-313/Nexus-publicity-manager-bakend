@@ -5,7 +5,10 @@ from app.dominio.reglas import BOGOTA
 
 
 def programar(c: Conn, ahora: datetime) -> None:
+    from app.agentes.descubrimiento import programar_descubrimiento
+
     now = ahora.astimezone(BOGOTA)
+    programar_descubrimiento(c, now)
     minute = now.strftime("%Y-%m-%dT%H:%M")
     integraciones = {
         r["id"] for r in todos(c, "SELECT id FROM integraciones WHERE estado='conectada'")
