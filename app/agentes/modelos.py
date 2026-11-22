@@ -30,10 +30,22 @@ class Descubrimiento(BaseModel):
     empresas: list[EmpresaDescubierta]
 
 
+class NotaPaso(BaseModel):
+    orden: int
+    proposito: str  # p. ej. "Presentar el problema y el diagnóstico gratuito"
+    porQue: str  # por qué está escrito así para este segmento
+
+
+class NotasAgente(BaseModel):
+    general: str  # por qué esta ruta encaja con el segmento
+    pasos: list[NotaPaso]
+
+
 class CampanaPropuesta(BaseModel):
     nombre: str
     resumen: str
     secuencia: Secuencia
+    notas: NotasAgente
 
 
 class Clasificacion(BaseModel):

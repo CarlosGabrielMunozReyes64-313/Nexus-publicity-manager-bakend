@@ -280,11 +280,24 @@ def propuestas(c: Conn, filas: list[Row]) -> list[Row]:
     if ids:
         for v in todos(
             c,
-            "SELECT propuesta_id,version,contenido,creada_en AS fecha,decision,decidida_en,comentario FROM propuesta_versiones WHERE propuesta_id=ANY(%s::uuid[]) ORDER BY version",
+            "SELECT propuesta_id,version,contenido,creada_en AS fecha,autor,decision,decidida_en,comentario FROM propuesta_versiones WHERE propuesta_id=ANY(%s::uuid[]) ORDER BY version",
             (ids,),
         ):
             versiones[str(v.pop("propuesta_id"))].append(v)
     fuentes = evidencias_de(c, "propuesta_id", ids)
+    # Rutas de correo: campaña y segmento en una sola consulta (para la lista).
+    rutas: dict[str, Row] = {}
+    campanas_ids = [str(r["objetivo_campana_id"]) for r in filas if r.get("objetivo_campana_id")]
+    if campanas_ids:
+        for x in todos(
+            c,
+            """SELECT cam.id,cam.nombre AS campana_nombre,cam.estado AS campana_estado,
+                      s.id AS segmento_id,s.nombre AS segmento_nombre
+               FROM campanas cam JOIN segmentos s ON s.id=cam.segmento_id
+               WHERE cam.id=ANY(%s::uuid[])""",
+            (campanas_ids,),
+        ):
+            rutas[str(x.pop("id"))] = x
     out = []
     for r in filas:
         vs = versiones.get(str(r["id"]), [])
@@ -312,6 +325,7 @@ def propuestas(c: Conn, filas: list[Row]) -> list[Row]:
                 "decision": {"fecha": actual["decidida_en"], "comentario": actual["comentario"]}
                 if actual.get("decision")
                 else None,
+                "ruta": rutas.get(str(r.get("objetivo_campana_id"))),
             }
         )
     return out

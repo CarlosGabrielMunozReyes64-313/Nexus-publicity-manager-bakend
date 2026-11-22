@@ -75,7 +75,7 @@ Para desarrollar el frontend con Vite contra este backend, defina `APP_URL=http:
 
 ### Railway + Vercel
 
-`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **no añade migraciones**: basta con desplegar el código. En Railway, `APP_URL` debe ser el dominio público de Vercel de ese entorno. En Vercel, el destino del backend se define por entorno con `NEXUS_BACKEND_URL` (ver README del frontend); ya no hay una dirección fija en el repositorio.
+`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **añade la migración `0004`** (solo datos: la versión 2 del prompt del Estratega-redactor para rutas de correo; no toca tablas, CHECK ni disparadores). En el servicio de Railway, en *Settings → Deploy → Pre-deploy command*, debe estar `alembic upgrade head` (con `DATABASE_URL` del propietario de las migraciones). Si no se aplica, la aplicación funciona igual con el prompt anterior; solo cambia cómo redacta el agente. En Railway, `APP_URL` debe ser el dominio público de Vercel de ese entorno. En Vercel, el destino del backend se define por entorno con `NEXUS_BACKEND_URL` (ver README del frontend); ya no hay una dirección fija en el repositorio.
 
 Después de actualizar, el receptor del formulario respeta el estado de la integración «Formulario». Si el secreto está configurado y nadie había tocado esa integración, el primer arranque la deja conectada para no cortar la captación; una desconexión explícita del administrador siempre se respeta.
 
@@ -98,7 +98,7 @@ La sesión tiene una duración de 12 horas. La cookie es HttpOnly, SameSite=Lax 
 
 Active Gmail API, configure `GMAIL_CUENTA_ENVIO` y use el botón Conectar de Gmail. El flujo pide `gmail.send` y `gmail.readonly`, verifica la cuenta y cifra el refresh token con Fernet. No introduzca tokens directamente en el frontend.
 
-Para enviar una campaña: apruebe bases legales y segmento, pida la campaña al agente con «Pedir campaña al agente» en el segmento aprobado, revise y apruebe la propuesta, inscriba contactos elegibles y active la campaña. La aprobación por sí sola no inscribe ni envía. Los segmentos también se pueden pedir al agente («Pedir propuestas al agente» en Segmentos); el avance y el motivo de un fallo se ven en Propuestas.
+Para enviar una campaña: apruebe bases legales y segmento, pida la ruta de correos al agente con «Pedir una ruta de correos» en Propuestas (o «Pedir campaña al agente» en el segmento aprobado, que usa 3 correos y el objetivo por defecto), revísela correo por correo, edítela o recházela con un comentario si hace falta, apruébela, inscriba contactos elegibles y active la campaña. La aprobación por sí sola no inscribe ni envía. Los segmentos también se pueden pedir al agente («Pedir propuestas al agente» en Segmentos); el avance y el motivo de un fallo se ven en Propuestas.
 
 Un envío ambiguo queda en `enviando`, pausa campañas y requiere conciliación. El motor consulta Gmail por Message-ID y encabezado de idempotencia; si encuentra el mensaje, registra el resultado sin reenviarlo. Una ausencia en la búsqueda no se trata como prueba de no entrega. Revise `mensajes.ultimo_error` y la auditoría; no cambie estados manualmente para forzar un reenvío.
 
@@ -240,6 +240,6 @@ Para el recorrido de navegador, instale Playwright (`npm install --no-save playw
 - `app/integraciones`: Gmail, Hunter, GA4 y Search Console; adaptadores falsos para pruebas.
 - `app/publico`: bajas, enlaces de seguimiento y formulario firmado.
 - `app/tareas`: cola PostgreSQL, programación y trabajador.
-- `migraciones`: original SQL, seguridad OAuth y prompts/contadores de agentes.
+- `migraciones`: original SQL, seguridad OAuth, prompts/contadores de agentes y (0004) el prompt v2 del Estratega-redactor para rutas de correo.
 - El frontend está en su propia carpeta (`Nexus-publicity-manager-main`); Docker lo compila desde `FRONTEND_DIR`.
 - `pruebas`, `scripts`, `sql`: verificación, instalación y originales.

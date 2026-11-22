@@ -38,7 +38,9 @@ def nueva_propuesta(
     return r
 
 
-def versionar(c: Conn, p: Row, contenido: Any, resumen: str | None = None) -> None:
+def versionar(
+    c: Conn, p: Row, contenido: Any, resumen: str | None = None, autor: str = "admin"
+) -> None:
     version = p["version_actual"] + 1
     insertar(
         c,
@@ -47,7 +49,7 @@ def versionar(c: Conn, p: Row, contenido: Any, resumen: str | None = None) -> No
             "propuesta_id": p["id"],
             "version": version,
             "contenido": Jsonb(serializar(contenido)),
-            "autor": "admin",
+            "autor": autor,
         },
     )
     actualizar(
@@ -80,13 +82,29 @@ def revisar_pendientes(c: Conn) -> None:
                 {"objetivo_campana_id": cam["id"]},
             )
         else:
+            from app.api.rutas_correo import normalizar, notas_editadas
+
             last = uno(
                 c,
-                "SELECT contenido FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
+                "SELECT contenido,creada_en FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
                 (p["id"], p["version_actual"]),
             )
-            if p["estado"] != "pendiente" or last["contenido"] != seq:
-                versionar(c, p, seq)
+            nueva = normalizar(seq)
+            notas = notas_editadas(last["contenido"], nueva) if nueva else None
+            contenido = {**seq, "notasAgente": notas} if notas else seq
+            if p["estado"] == "aprobada":
+                # Ruta ya aprobada y revocada (marca, segmento, secuencia): como antes, una
+                # versión nueva con la secuencia vigente, que es la aprobada o una posterior.
+                versionar(c, p, contenido)
+                continue
+            if normalizar(last["contenido"]) == nueva:
+                continue
+            # Solo una secuencia modificada DESPUÉS de la última versión la reemplaza; si
+            # no, gana la versión del administrador (o del agente): nunca se pisa con
+            # contenido más antiguo.
+            secuencia = obtener(c, "secuencias", str(cam["secuencia_id"]))
+            if secuencia["actualizado_en"] > last["creada_en"]:
+                versionar(c, p, contenido)
 
 
 def guardar_secuencia(c: Conn, ident: str, body: Row, revisar: bool = True) -> None:
@@ -146,6 +164,12 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
     if v["decision"]:
         raise HTTPException(400, "Esta versión ya fue decidida; cree una versión nueva")
     if p["tipo"] == "campana":
+        from app.api.rutas_correo import revision
+
+        # La misma lista de verificación que ve el administrador decide si se aprueba.
+        rev = revision(c, p, v)
+        if not rev["puedeAprobar"]:
+            raise HTTPException(400, ". ".join(rev["bloqueos"] + rev["errores"]))
         cam = obtener(c, "campanas", str(p["objetivo_campana_id"]), True)
         seq = obtener(c, "secuencias", str(cam["secuencia_id"]), True)
         if isinstance(v["contenido"], dict) and "pasos" in v["contenido"]:
@@ -340,9 +364,15 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
         else:
             raise HTTPException(404, "Ruta no encontrada")
     elif recurso == "propuestas" and ident:
+        from app.api import rutas_correo
+
         prop = obtener(c, "propuestas", ident, True)
         if action == "aprobar" and method == "POST":
             aprobar(c, prop, admin)
+        elif action == "previsualizar" and method == "POST":
+            return rutas_correo.previsualizar(c, prop, body)
+        elif action == "restaurar" and method == "POST":
+            return rutas_correo.restaurar(c, prop, body)
         elif action == "rechazar" and method == "POST":
             text = str(body.get("comentario", "")).strip()
             if len(text) < 3:
@@ -352,6 +382,8 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                 "SELECT * FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
                 (ident, prop["version_actual"]),
             )
+            if v["decision"]:
+                raise HTTPException(400, "Esta versión ya fue decidida; cree una versión nueva")
             actualizar(
                 c,
                 "propuesta_versiones",
@@ -364,24 +396,32 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                 },
             )
             actualizar(c, "propuestas", ident, {"estado": "rechazada"})
-            if prop["agente"] == "estratega_redactor":
+            pedir = body.get("pedirNuevaVersion", True) is not False
+            if pedir and prop["agente"] == "estratega_redactor" and prop["tipo"] == "campana":
                 encolar(c, "revisar_campana", {"propuestaId": ident})
         elif method == "PUT" and not action:
-            resumen = str(body.get("resumen", "")).strip()
-            if len(resumen) < 5:
-                raise HTTPException(400, "El resumen requiere al menos 5 caracteres")
-            last = uno(
-                c,
-                "SELECT contenido FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
-                (ident, prop["version_actual"]),
-            )
-            contenido = last["contenido"]
+            if not isinstance(body, dict) or ("resumen" not in body and "contenido" not in body):
+                raise HTTPException(400, "Indique el resumen o el contenido")
+            resumen = None
+            if "resumen" in body:
+                resumen = str(body.get("resumen") or "").strip()
+                if len(resumen) < 5:
+                    raise HTTPException(400, "El resumen requiere al menos 5 caracteres")
+            if "contenido" in body:
+                contenido = rutas_correo.contenido_editado(c, prop, body["contenido"])
+            else:
+                contenido = uno(
+                    c,
+                    "SELECT contenido FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
+                    (ident, prop["version_actual"]),
+                )["contenido"]
             versionar(c, prop, contenido, resumen)
             if prop["tipo"] == "campana":
                 c.execute(
                     "SELECT revocar_aprobaciones(ARRAY[%s]::uuid[],%s)",
                     (prop["objetivo_campana_id"], "Propuesta editada"),
                 )
+            return {"ok": True, "version": prop["version_actual"] + 1}
         else:
             raise HTTPException(404, "Ruta no encontrada")
     elif recurso == "campanas" and ident and method == "POST":

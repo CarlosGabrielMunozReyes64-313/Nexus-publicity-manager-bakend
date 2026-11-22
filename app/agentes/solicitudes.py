@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from app.api import lecturas
 from app.config import config
-from app.db import Conn, auditar, encolar, obtener, todos, uno
+from app.db import Conn, auditar, encolar, todos, uno
 
 TIPOS = ("proponer_segmentos", "proponer_campana", "revisar_campana")
 EN_CURSO = ("pendiente", "en_proceso")
@@ -75,28 +75,13 @@ def pedir_segmentos(c: Conn) -> dict[str, Any]:
 
 
 def pedir_campana(c: Conn, segmento_id: str) -> dict[str, Any]:
-    proveedor_configurado()
-    seg = obtener(c, "segmentos", segmento_id)
-    if seg["estado"] != "aprobado":
-        raise HTTPException(409, "Apruebe el segmento antes de pedir una campaña")
-    if not contactos_elegibles(c, seg["reglas"]):
-        raise HTTPException(
-            409,
-            "El segmento no tiene contactos elegibles (con base legal aprobada, sin baja ni "
-            "exclusión); el Estratega no propondría envíos",
-        )
-    if uno(
-        c,
-        "SELECT count(*) AS n FROM tareas WHERE tipo='proponer_campana' AND estado=ANY(%s) "
-        "AND datos->>'segmentoId'=%s",
-        (list(EN_CURSO), str(seg["id"])),
-    )["n"]:
-        raise HTTPException(409, "Ya hay una campaña en preparación para este segmento")
-    clave = f"proponer_campana:{seg['id']}:{uuid4()}"
-    encolar(c, "proponer_campana", {"segmentoId": str(seg["id"])}, clave, 6)
-    tarea = uno(c, "SELECT id FROM tareas WHERE clave_unica=%s", (clave,))
-    auditar(c, "pedir_propuesta_campana", "segmentos", str(seg["id"]))
-    return {"tareaId": str(tarea["id"])}
+    """Ruta anterior (se conserva): pide una ruta de 3 correos con el objetivo por defecto."""
+    from app.api.rutas_correo import OBJETIVO_POR_DEFECTO, encolar_ruta
+
+    tarea = encolar_ruta(
+        c, {"segmentoId": segmento_id, "objetivo": OBJETIVO_POR_DEFECTO, "numeroCorreos": 3}
+    )
+    return {"tareaId": tarea}
 
 
 def lista(c: Conn) -> list[dict[str, Any]]:

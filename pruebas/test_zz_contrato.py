@@ -20,7 +20,7 @@ def test_todas_las_lecturas_con_datos(auth):
         insertar(c,'recomendaciones',{'texto':'Muestra insuficiente'})
         insertar(c,'puntajes',{'empresa_id':ct['empresa_id'],'total':0,'incompleto':True,'criterios':Jsonb([{'nombre':'Criterio','cumple':None,'peso':30,'explicacion':'Sin fuente'}]),'version_reglas':1})
         insertar(c,'interacciones',{'contacto_id':ct['id'],'tipo':'nota','resumen':'Nota de prueba'})
-    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica','agentes/solicitudes':'solicitudAgente'}
+    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica','agentes/solicitudes':'solicitudAgente','propuestas/solicitudes':'solicitudRuta','propuestas/rutas-correo/segmentos':'segmentoRuta'}
     records=[]
     for path,schema in mappings.items():
         res=auth.get('/api/'+path)
@@ -40,5 +40,13 @@ def test_todas_las_lecturas_con_datos(auth):
         res=auth.get('/api/'+path)
         assert res.status_code==200,(path,res.text)
         records.append({'ruta':path,'schema':schema,'array':False,'data':res.json()})
+    # Rutas de correo: revisión y contactos elegibles de la última ruta propuesta.
+    rutas=[x for x in auth.get('/api/propuestas').json() if x['tipo']=='campana']
+    assert rutas, 'Se requiere al menos una ruta de correo (la crean las pruebas de rutas)'
+    for ruta in rutas[:3]:
+        for suffix,schema in (('revision','revisionRuta'),('elegibles','contactoElegible')):
+            res=auth.get('/api/propuestas/'+ruta['id']+'/'+suffix)
+            assert res.status_code==200,(suffix,res.text)
+            records.append({'ruta':'propuestas/'+ruta['id']+'/'+suffix,'schema':schema,'array':suffix=='elegibles','data':res.json()})
     out=Path('pruebas/salidas');out.mkdir(parents=True,exist_ok=True)
     (out/'contratos.json').write_text(json.dumps(records))

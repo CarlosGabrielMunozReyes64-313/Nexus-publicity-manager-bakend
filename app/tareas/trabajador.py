@@ -114,17 +114,19 @@ DEFINITIVOS = {
     "El segmento requiere aprobación",
     "No hay contactos elegibles con base legal aprobada",
     "El Segmentador propuso reglas no válidas",
+    "El segmento no tiene contactos elegibles con base legal aprobada",
 }
+# Prefijos de mensajes del validador de rutas (los motivos los escribe este backend).
+PREFIJOS_DEFINITIVOS = ("Secuencia no válida; requiere revisión", "La ruta propuesta no cumple:")
 
 
 def sin_reintento(exc: Exception) -> bool:
     if isinstance(exc, FalloProveedor):
         return not exc.reintentable
-    # La secuencia ya se corrigió una vez dentro de la tarea; repetir cuesta y rara vez
+    # La ruta ya se corrigió hasta dos veces dentro de la tarea; repetir cuesta y rara vez
     # cambia el resultado. El administrador puede volver a pedirla.
     return isinstance(exc, (ValueError, HTTPException)) and (
-        detalle_seguro(exc) in DEFINITIVOS
-        or detalle_seguro(exc).startswith("Secuencia no válida; requiere revisión")
+        detalle_seguro(exc) in DEFINITIVOS or detalle_seguro(exc).startswith(PREFIJOS_DEFINITIVOS)
     )
 
 
@@ -142,8 +144,8 @@ def detalle_seguro(exc: Exception) -> str:
     texto = str(exc)
     if (
         isinstance(exc, ValueError)
-        and texto.startswith("Secuencia no válida; requiere revisión")
-        and re.fullmatch(r"[\w\s{}.,:;()¿?¡!'\"-]{1,500}", texto)
+        and texto.startswith(PREFIJOS_DEFINITIVOS)
+        and re.fullmatch(r"[\w\s{}.,:;()¿?¡!'\"-]{1,1500}", texto)
     ):
         # Los motivos los escribe el validador de secuencias de este backend.
         return texto
@@ -161,6 +163,7 @@ def detalle_seguro(exc: Exception) -> str:
         "Tipo de tarea no registrado",
         "El segmento requiere aprobación",
         "No hay contactos elegibles con base legal aprobada",
+        "El segmento no tiene contactos elegibles con base legal aprobada",
     }
     if isinstance(exc, ValueError) and (
         texto in permitidos

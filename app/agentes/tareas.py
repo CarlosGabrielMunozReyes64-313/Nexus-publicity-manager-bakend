@@ -74,34 +74,49 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
             respuesta = obtener(c, "respuestas", payload["respuestaId"])
             entrada = {"texto": respuesta["texto"]}
         elif tipo in ("proponer_campana", "revisar_campana"):
+            from app.api import rutas_correo
+
+            rechazada: Row | None = None
             if tipo == "revisar_campana":
                 prop = obtener(c, "propuestas", payload["propuestaId"])
                 cam = obtener(c, "campanas", str(prop["objetivo_campana_id"]))
                 seg = obtener(c, "segmentos", str(cam["segmento_id"]))
-                comentario = uno(
+                rechazada = uno(
                     c,
-                    "SELECT comentario FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
+                    "SELECT contenido,comentario FROM propuesta_versiones "
+                    "WHERE propuesta_id=%s AND version=%s",
                     (prop["id"], prop["version_actual"]),
-                )["comentario"]
+                )
+                origen = uno(
+                    c,
+                    "SELECT datos FROM tareas WHERE tipo='proponer_campana' "
+                    "AND datos->>'propuestaId'=%s ORDER BY creada_en DESC LIMIT 1",
+                    (str(prop["id"]),),
+                    False,
+                )
+                solicitud = rutas_correo.solicitud_de((origen or {}).get("datos") or {})
             else:
                 seg = obtener(c, "segmentos", payload["segmentoId"])
-                comentario = None
+                solicitud = rutas_correo.solicitud_de(payload)
             if seg["estado"] != "aprobado":
-                raise ValueError("El segmento requiere aprobación")
-            contactos = lecturas.datos_segmento(c, seg["reglas"])
-            elegibles = [
-                ct
-                for ct in contactos
-                if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ct["id"],))["motivo"] is None
-            ]
-            if not elegibles:
-                raise ValueError("No hay contactos elegibles con base legal aprobada")
-            entrada = {
-                "segmento": serializar(seg),
-                "marca": marca,
-                "elegibles": len(elegibles),
-                "comentario": comentario,
-            }
+                raise ValueError(rutas_correo.SEGMENTO_SIN_APROBAR)
+            entrada = rutas_correo.entrada_agente(c, seg, solicitud)
+            if not entrada["elegibles"]:
+                raise ValueError(rutas_correo.SIN_ELEGIBLES)
+            numero_correos = solicitud["numeroCorreos"] if tipo == "proponer_campana" else None
+            if rechazada is not None:
+                entrada["versionRechazada"] = rutas_correo.normalizar(rechazada["contenido"])
+                entrada["notasVersionRechazada"] = (
+                    rechazada["contenido"].get("notasAgente")
+                    if isinstance(rechazada["contenido"], dict)
+                    else None
+                )
+                entrada["comentario"] = rechazada["comentario"]
+                entrada["comentariosAnteriores"] = [
+                    x
+                    for x in rutas_correo.comentarios_rechazo(c, str(prop["id"]))
+                    if x != rechazada["comentario"]
+                ]
         elif tipo == "proponer_segmentos":
             entrada = {
                 "empresas": serializar(
@@ -176,22 +191,36 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
     elif tipo == "clasificar_respuesta":
         result = ejecutar("analista", entrada, Clasificacion, proveedor, ligero=True)
     elif tipo in ("proponer_campana", "revisar_campana"):
+
+        def problemas(r: CampanaPropuesta) -> list[str]:
+            s = r.secuencia.model_dump(by_alias=True, exclude_none=True)
+            errores = validar_secuencia(s, marca["prohibidas"])
+            if numero_correos and len(s["pasos"]) != numero_correos:
+                errores.append(
+                    f"Se pidieron {numero_correos} correos y la ruta tiene {len(s['pasos'])}"
+                )
+            return errores
+
         result = ejecutar("estratega_redactor", entrada, CampanaPropuesta, proveedor)
-        errors = validar_secuencia(
-            result.secuencia.model_dump(by_alias=True, exclude_none=True), marca["prohibidas"]
-        )
-        if errors:
+        errors = problemas(result)
+        # Hasta dos correcciones con la lista de errores; si sigue sin cumplir, la tarea
+        # falla sin reintentos (repetir cuesta y no lo corrige) y el motivo queda visible.
+        for _ in range(2):
+            if not errors:
+                break
             result = ejecutar(
                 "estratega_redactor",
-                {"entrada": entrada, "corregir": errors},
+                {
+                    "entrada": entrada,
+                    "rutaAnterior": result.secuencia.model_dump(by_alias=True, exclude_none=True),
+                    "corregir": errors,
+                },
                 CampanaPropuesta,
                 proveedor,
             )
-            errors = validar_secuencia(
-                result.secuencia.model_dump(by_alias=True, exclude_none=True), marca["prohibidas"]
-            )
+            errors = problemas(result)
         if errors:
-            raise ValueError("Secuencia no válida; requiere revisión: " + ". ".join(errors))
+            raise ValueError("La ruta propuesta no cumple: " + ". ".join(errors))
     elif tipo == "proponer_segmentos":
         result = ejecutar("segmentador", entrada, SegmentoPropuesto, proveedor)
         reglas_validas(result.reglas)
@@ -314,10 +343,11 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     )
         elif tipo in ("proponer_campana", "revisar_campana"):
             s = result.secuencia.model_dump(by_alias=True, exclude_none=True)
+            notas = result.notas.model_dump()
             if tipo == "revisar_campana":
-                # Agent creates a proposal version only; never edits an approved campaign.
+                # El agente solo crea una versión de la propuesta; nunca edita la campaña.
                 prop = obtener(c, "propuestas", payload["propuestaId"], True)
-                versionar(c, prop, s, result.resumen)
+                versionar(c, prop, {**s, "notasAgente": notas}, result.resumen, autor="agente")
             else:
                 seq = insertar(
                     c,
@@ -356,13 +386,24 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                         "estado": "en_revision",
                     },
                 )
-                nueva_propuesta(
+                creada = nueva_propuesta(
                     c,
                     "estratega_redactor",
                     "campana",
                     result.resumen,
-                    serializar(lecturas.secuencia(c, obtener(c, "secuencias", str(seq["id"])))),
+                    {
+                        **serializar(
+                            lecturas.secuencia(c, obtener(c, "secuencias", str(seq["id"])))
+                        ),
+                        "notasAgente": notas,
+                    },
                     {"objetivo_campana_id": cam["id"]},
+                )
+                # Así la lista de solicitudes enlaza con la ruta creada.
+                c.execute(
+                    "UPDATE tareas SET datos=datos||jsonb_build_object('propuestaId',%s::text) "
+                    "WHERE id=%s",
+                    (str(creada["id"]), tarea_id),
                 )
         elif tipo == "proponer_segmentos":
             seg = insertar(

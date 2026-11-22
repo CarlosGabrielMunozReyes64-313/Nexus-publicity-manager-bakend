@@ -108,7 +108,7 @@ def test_pedidos_validan_requisitos_antes_de_gastar(auth, monkeypatch):
         assert r.status_code == 409 and "en curso" in r.json()["message"]
 
         r = auth.post(f"/api/segmentos/{sin_aprobar}/proponer-campana", json={})
-        assert r.status_code == 409 and "Apruebe el segmento" in r.json()["message"]
+        assert r.status_code == 409 and "El segmento requiere aprobación" in r.json()["message"]
         r = auth.post(f"/api/segmentos/{sin_elegibles}/proponer-campana", json={})
         assert r.status_code == 409 and "contactos elegibles" in r.json()["message"]
         r = auth.post(f"/api/segmentos/{listo}/proponer-campana", json={})
@@ -164,6 +164,10 @@ def test_los_agentes_crean_segmento_y_campana_aprobables(auth, monkeypatch):
                 {
                     "nombre": "Diagnóstico para proveedores",
                     "resumen": "Invitación a un diagnóstico gratuito.",
+                    "notas": {
+                        "general": "Proveedores que deben responder cuestionarios.",
+                        "pasos": [{"orden": 1, "proposito": "Presentar", "porQue": "Breve"}],
+                    },
                     "secuencia": {
                         "nombre": "Diagnóstico",
                         "objetivo": "Agendar diagnóstico",
@@ -174,15 +178,17 @@ def test_los_agentes_crean_segmento_y_campana_aprobables(auth, monkeypatch):
                             "desde": "08:00",
                             "hasta": "17:00",
                         },
+                        # Ruta pedida por la ruta anterior: 3 correos por defecto.
                         "pasos": [
                             {
-                                "orden": 1,
-                                "asunto": "Diagnóstico de sostenibilidad",
+                                "orden": i,
+                                "asunto": "Diagnóstico de sostenibilidad" if i == 1 else None,
                                 "cuerpo": cuerpo,
-                                "esperaDiasHabiles": 0,
-                                "mismoHilo": False,
+                                "esperaDiasHabiles": [0, 4, 5][i - 1],
+                                "mismoHilo": i > 1,
                                 "variables": [],
                             }
+                            for i in (1, 2, 3)
                         ],
                     },
                 }
@@ -227,4 +233,4 @@ def test_fallo_del_estratega_queda_visible(auth, monkeypatch):
     procesar(t)
     pedido = next(p for p in auth.get("/api/agentes/solicitudes").json() if p["id"] == tarea)
     assert pedido["estado"] == "fallida" and pedido["intentos"] == 1
-    assert pedido["error"] == "No hay contactos elegibles con base legal aprobada"
+    assert pedido["error"] == "El segmento no tiene contactos elegibles con base legal aprobada"

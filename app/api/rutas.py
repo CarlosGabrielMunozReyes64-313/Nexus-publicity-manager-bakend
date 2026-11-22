@@ -62,6 +62,23 @@ def leer(ruta: str, request: Request) -> Any:
             from app.api.medicion import metricas
 
             result = metricas(c, dict(params))
+        elif ruta == "propuestas/solicitudes":
+            from app.api.rutas_correo import solicitudes as solicitudes_rutas
+
+            result = solicitudes_rutas(c)
+        elif ruta == "propuestas/rutas-correo/segmentos":
+            from app.api.rutas_correo import segmentos_para_ruta
+
+            result = segmentos_para_ruta(c)
+        elif recurso == "propuestas" and len(parts) == 3 and parts[2] in ("revision", "elegibles"):
+            from app.api import rutas_correo
+
+            prop = obtener(c, "propuestas", parts[1])
+            result = (
+                rutas_correo.revision(c, prop)
+                if parts[2] == "revision"
+                else rutas_correo.elegibles_de(c, prop)
+            )
         elif ruta == "agentes/solicitudes":
             from app.agentes.solicitudes import lista as solicitudes
 
@@ -255,6 +272,20 @@ def mutacion(
         from app.integraciones.conexiones import cambiar
 
         return {"ok": True, **cambiar(c, ident, action)}
+    elif ruta == "propuestas/rutas-correo" and method == "POST":
+        from app.api.rutas_correo import pedir
+
+        return pedir(c, body)
+    elif (
+        recurso == "propuestas"
+        and ident == "solicitudes"
+        and len(p) == 4
+        and p[3] == "reintentar"
+        and method == "POST"
+    ):
+        from app.api.rutas_correo import reintentar
+
+        return reintentar(c, p[2])
     elif ruta == "segmentos/proponer" and method == "POST":
         from app.agentes.solicitudes import pedir_segmentos
 
