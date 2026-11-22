@@ -98,7 +98,7 @@ La sesión tiene una duración de 12 horas. La cookie es HttpOnly, SameSite=Lax 
 
 Active Gmail API, configure `GMAIL_CUENTA_ENVIO` y use el botón Conectar de Gmail. El flujo pide `gmail.send` y `gmail.readonly`, verifica la cuenta y cifra el refresh token con Fernet. No introduzca tokens directamente en el frontend.
 
-Para enviar una campaña: apruebe bases legales y segmento, revise y apruebe la propuesta, inscriba contactos elegibles y active la campaña. La aprobación por sí sola no inscribe ni envía.
+Para enviar una campaña: apruebe bases legales y segmento, pida la campaña al agente con «Pedir campaña al agente» en el segmento aprobado, revise y apruebe la propuesta, inscriba contactos elegibles y active la campaña. La aprobación por sí sola no inscribe ni envía. Los segmentos también se pueden pedir al agente («Pedir propuestas al agente» en Segmentos); el avance y el motivo de un fallo se ven en Propuestas.
 
 Un envío ambiguo queda en `enviando`, pausa campañas y requiere conciliación. El motor consulta Gmail por Message-ID y encabezado de idempotencia; si encuentra el mensaje, registra el resultado sin reenviarlo. Una ausencia en la búsqueda no se trata como prueba de no entrega. Revise `mensajes.ultimo_error` y la auditoría; no cambie estados manualmente para forzar un reenvío.
 
@@ -136,6 +136,21 @@ python scripts/encolar.py informe_semanal
 ```
 
 No hay herramientas del modelo que envíen o aprueben. Las citas se vuelven a consultar y se comparan por texto normalizado. El lector bloquea IP privadas, destinos de metadatos, protocolos y puertos no permitidos; fija la IP resuelta durante la conexión TLS para evitar DNS rebinding. Respeta robots.txt y limita tamaño, tiempo y frecuencia.
+
+### Descubrimiento gratuito: Tavily + Gemini
+
+Sin pagar a Google ni a Anthropic: Gemini en el plan gratuito para todos los agentes y Tavily como buscador de Descubrimiento (la búsqueda en Google de Gemini 3 no existe en el plan gratuito).
+
+1. Cree una cuenta gratuita en app.tavily.com (1.000 créditos al mes, sin tarjeta) y copie su clave `tvly-...`.
+2. En el backend y el trabajador:
+   ```env
+   AGENTE_PROVEEDOR=gemini
+   GEMINI_API_KEY=su clave del plan gratuito
+   TAVILY_API_KEY=tvly-...
+   ```
+3. En Configuración → Integraciones, «Conectar» la API de IA prueba Gemini y Tavily (usa 1 crédito) y debe decir «Descubrimiento usará Tavily (búsqueda comprobada)».
+
+Cada búsqueda de Descubrimiento hace hasta `TAVILY_CONSULTAS_MAX` consultas (1 crédito cada una; con 4, unas 250 búsquedas al mes), descarta redes sociales y directorios, lee la página de contacto de cada sitio con el lector propio (respeta robots.txt) y el agente extrae nombre, municipio y correo corporativo de esas páginas. Como siempre, cada cita se comprueba en el sitio antes de guardar. Con `BUSCADOR_DESCUBRIMIENTO=proveedor` se vuelve a la búsqueda del modelo aunque haya clave de Tavily. En el plan gratuito de Gemini, Google puede usar lo que se envía para mejorar sus productos (incluido el texto de las respuestas que clasifica el agente); revíselo con su política de datos.
 
 ### Hunter
 

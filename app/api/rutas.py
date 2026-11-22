@@ -62,6 +62,10 @@ def leer(ruta: str, request: Request) -> Any:
             from app.api.medicion import metricas
 
             result = metricas(c, dict(params))
+        elif ruta == "agentes/solicitudes":
+            from app.agentes.solicitudes import lista as solicitudes
+
+            result = solicitudes(c)
         elif ruta == "auditoria":
             result = auditoria.lista(c, params)
         elif ruta == "auditoria/pagina":
@@ -251,6 +255,14 @@ def mutacion(
         from app.integraciones.conexiones import cambiar
 
         return {"ok": True, **cambiar(c, ident, action)}
+    elif ruta == "segmentos/proponer" and method == "POST":
+        from app.agentes.solicitudes import pedir_segmentos
+
+        return {"ok": True, **pedir_segmentos(c)}
+    elif recurso == "segmentos" and ident and action == "proponer-campana" and method == "POST":
+        from app.agentes.solicitudes import pedir_campana
+
+        return {"ok": True, **pedir_campana(c, ident)}
     elif recurso in ("segmentos", "secuencias", "propuestas", "campanas"):
         from app.api.campanas import modificar
 

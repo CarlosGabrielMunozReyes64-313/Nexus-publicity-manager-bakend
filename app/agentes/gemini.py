@@ -252,7 +252,12 @@ class GeminiReal:
                 ) from None
 
 
-def probar_conexion(clave: str, modelo: str, transport: httpx.BaseTransport | None = None) -> str:
+def probar_conexion(
+    clave: str,
+    modelo: str,
+    transport: httpx.BaseTransport | None = None,
+    buscar: bool = True,
+) -> str:
     """Prueba de Integraciones: la clave y, aparte, la búsqueda en Google de Descubrimiento.
 
     Devuelve el detalle a mostrar; lanza ValueError (texto fijo) si Gemini no responde.
@@ -275,6 +280,8 @@ def probar_conexion(clave: str, modelo: str, transport: httpx.BaseTransport | No
         respuesta = post(False)
         if respuesta.status_code != 200:
             raise ValueError(clasificar(respuesta)[0])
+        if not buscar:
+            return "Conexión comprobada con Gemini"
         respuesta = post(True)
         if respuesta.status_code == 200:
             return (

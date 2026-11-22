@@ -65,8 +65,19 @@ DESCONECTADA = {
 
 
 def probar_proveedor_ia() -> tuple[str, str]:
-    """Llamada mínima al proveedor de agentes activo. Devuelve (secreto, detalle)."""
+    """Llamada mínima al proveedor de agentes activo y al buscador de Descubrimiento.
+
+    Devuelve (secreto, detalle). Con Tavily configurado se prueba Tavily (1 crédito) en
+    lugar de la búsqueda integrada del proveedor.
+    """
+    from app.agentes import buscador
+    from app.agentes.errores import FalloProveedor
+
     cfg = config()
+    try:
+        tavily = buscador.usar_tavily()
+    except FalloProveedor as exc:
+        raise ValueError(str(exc)) from None
     if cfg.agente_proveedor == "gemini":
         secret = cfg.gemini_api_key.get_secret_value()
         if not secret:
@@ -75,14 +86,22 @@ def probar_proveedor_ia() -> tuple[str, str]:
             raise ValueError("GEMINI_MODELO no válido")
         from app.agentes.gemini import probar_conexion
 
-        return secret, probar_conexion(secret, cfg.gemini_modelo)
-    secret = cfg.anthropic_api_key.get_secret_value()
-    if not secret:
-        raise ValueError("Configure ANTHROPIC_API_KEY en el servidor")
-    return secret, probar_claude(secret)
+        detalle = probar_conexion(secret, cfg.gemini_modelo, buscar=not tavily)
+    else:
+        secret = cfg.anthropic_api_key.get_secret_value()
+        if not secret:
+            raise ValueError("Configure ANTHROPIC_API_KEY en el servidor")
+        detalle = probar_claude(secret, buscar=not tavily)
+    if not tavily:
+        return secret, detalle
+    try:
+        buscador.probar(cfg.tavily_api_key.get_secret_value())
+    except FalloProveedor as exc:
+        return secret, f"{detalle}, pero la prueba de Tavily (Descubrimiento) falló: {exc}"
+    return secret, f"{detalle}; Descubrimiento usará Tavily (búsqueda comprobada)"
 
 
-def probar_claude(secret: str, cliente: Any = None) -> str:
+def probar_claude(secret: str, cliente: Any = None, buscar: bool = True) -> str:
     """Clave y modelo ligero; aparte, la búsqueda web que usa Descubrimiento."""
     import anthropic
 
@@ -101,6 +120,8 @@ def probar_claude(secret: str, cliente: Any = None) -> str:
         raise ValueError(clasificar_claude(exc)[0]) from None
     except anthropic.APIConnectionError:
         raise ValueError("Claude no disponible (red); revise clave, cuota y modelo") from None
+    if not buscar:
+        return "Conexión comprobada con Claude"
     try:
         found = client.messages.create(
             model=cfg.claude_modelo_mayor,

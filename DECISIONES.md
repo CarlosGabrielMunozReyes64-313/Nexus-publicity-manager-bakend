@@ -58,3 +58,18 @@ Sin migraciones nuevas: el despliegue en Railway no ejecuta `alembic upgrade`, a
 - **Motivo visible.** La búsqueda muestra «Intento N de M sin éxito: motivo. Nuevo intento a las HH:MM» mientras espera y «No se pudo completar la búsqueda. motivo.» si falla; los errores definitivos de agentes ya no gastan reintentos.
 - **Prueba de conexión.** Conectar la integración de IA con Gemini prueba también la búsqueda en Google y avisa si Descubrimiento no funcionará.
 - **Claude con el mismo cuidado.** Los errores de Anthropic se clasifican (sin créditos, límite de gasto, búsqueda web deshabilitada, clave, modelo, límite, saturación) con textos fijos. Como la API responde 200 aunque la búsqueda web falle, un error dentro del contenido o una respuesta sin búsquedas ya no termina en «0 resultados» silencioso: la búsqueda falla con el motivo. «Conectar» la API de Claude prueba también una búsqueda web.
+
+## Propuestas a pedido (22 de noviembre de 2026)
+
+- **Faltaba el disparador.** Los agentes Segmentador (`proponer_segmentos`) y Estratega-redactor (`proponer_campana`) existían, pero nada los encolaba; como las campañas solo nacen de esa propuesta, en producción no se podía crear ninguna campaña nueva. Ahora: `POST /segmentos/proponer`, `POST /segmentos/:id/proponer-campana` y `GET /agentes/solicitudes`, siguiendo el «a pedido» de la sección 18 de REQUISITOS (no se programan solos).
+- **Validar antes de gastar.** Antes de encolar se comprueba el proveedor de IA (clave y precios), que haya empresas, que el segmento esté aprobado y tenga contactos elegibles, y que no haya otro pedido igual en curso; cada caso responde 409 con el motivo.
+- **Motivo visible.** Un fallo del agente queda en la lista de pedidos con un texto seguro (contactos no elegibles, segmento sin aprobar, reglas o secuencia no válidas, errores del proveedor). Esos fallos no gastan reintentos.
+- **Pruebas.** Antes no había pruebas de estos agentes; ahora una prueba recorre segmento propuesto → campaña propuesta → aprobación con un proveedor falso.
+
+## Descubrimiento con Tavily (22 de noviembre de 2026)
+
+- **Por qué.** La búsqueda en Google de Gemini 3 no existe en el plan gratuito y la de Claude se paga. Con `TAVILY_API_KEY` (plan gratuito de 1.000 créditos al mes), Descubrimiento usa Tavily como buscador y el agente solo extrae de páginas ya leídas, algo que el plan gratuito de Gemini sí permite.
+- **Flujo.** Consultas repartidas entre tipos y municipios (hasta `TAVILY_CONSULTAS_MAX`, 1 crédito cada una), exclusión de redes, directorios, portales de empleo y comercio, un resultado por dominio, página de contacto leída con el lector propio (robots.txt, sin direcciones privadas, en paralelo y con tiempo acotado) y extracción con el esquema `DescubrimientoEnPaginas`, cuyas instrucciones van fuera de los datos no confiables. La verificación de citas y el guardado son los mismos que con la búsqueda del proveedor.
+- **Sin páginas no hay gasto.** Si Tavily no devuelve sitios utilizables, la búsqueda termina sin resultados y no se llama al modelo.
+- **Errores.** Clave inválida (401) y créditos o límite agotados (432/433) fallan de inmediato con el motivo; 429 y 5xx se reintentan. «Conectar» la API de IA prueba Tavily en lugar de la búsqueda del proveedor.
+- **Costo.** `TAVILY_COSTO_CREDITO_USD=0` (plan gratuito); con pago por uso, el gasto se registra en costos.

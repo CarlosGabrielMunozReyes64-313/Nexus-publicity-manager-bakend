@@ -15,8 +15,9 @@ from app.agentes.modelos import (
 )
 from app.api import datos, lecturas
 from app.api.campanas import nueva_propuesta, versionar
+from app.config import config
 from app.db import Row, actualizar, insertar, obtener, todos, transaccion, uno
-from app.dominio.reglas import reglas_validas, validar_secuencia
+from app.dominio.reglas import BOGOTA, reglas_validas, validar_secuencia
 from app.esquemas.serializar import serializar
 
 
@@ -139,7 +140,39 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
         result = ejecutar("investigador", entrada, Enriquecimiento, proveedor)
         ev = fuentes(result.datos, e["dominio"] or urlsplit(e["sitio_web"]).hostname)
     elif tipo == "descubrir_empresas":
-        result = ejecutar("investigador", entrada, Descubrimiento, proveedor)
+        from app.agentes import buscador
+
+        if buscador.usar_tavily():
+            paginas, hechas = buscador.candidatos(entrada)
+            with transaccion("agente:investigador", accion="buscar_tavily") as c:
+                actualizar(c, "busquedas_descubrimiento", str(busqueda["id"]), {"progreso": 50})
+                precio = config().tavily_costo_credito_usd
+                if precio > 0 and hechas:
+                    insertar(
+                        c,
+                        "costos",
+                        {
+                            "fecha": datos.ahora().astimezone(BOGOTA).date(),
+                            "categoria": "otro",
+                            "concepto": f"Tavily: {hechas} búsquedas",
+                            "monto": round(precio * hechas, 2),
+                            "moneda": "USD",
+                        },
+                    )
+            # Sin páginas no hay nada que extraer: la búsqueda termina sin resultados y
+            # no se gasta el modelo.
+            result = (
+                ejecutar(
+                    "investigador",
+                    {"criterios": entrada, "paginas": paginas},
+                    buscador.DescubrimientoEnPaginas,
+                    proveedor,
+                )
+                if paginas
+                else buscador.DescubrimientoEnPaginas(empresas=[])
+            )
+        else:
+            result = ejecutar("investigador", entrada, Descubrimiento, proveedor)
     elif tipo == "clasificar_respuesta":
         result = ejecutar("analista", entrada, Clasificacion, proveedor, ligero=True)
     elif tipo in ("proponer_campana", "revisar_campana"):

@@ -265,8 +265,16 @@ def ejecutar(
     precios = precios_de(model, cfg.gemini_precios_json if gemini else cfg.claude_precios_json)
     if not precios:
         raise ValueError("Configure los precios del proveedor para el modelo seleccionado")
+    # Instrucciones fijas (de este backend, fuera de los datos no confiables) para extraer
+    # empresas de páginas ya leídas por el buscador externo.
+    prefijo = ""
+    if schema.__name__ == "DescubrimientoEnPaginas":
+        from app.agentes.buscador import INSTRUCCIONES
+
+        prefijo = INSTRUCCIONES
     payload = (
-        "<datos_no_confiables>"
+        prefijo
+        + "<datos_no_confiables>"
         + json.dumps(entrada, ensure_ascii=False, default=str)
         + "</datos_no_confiables>"
     )

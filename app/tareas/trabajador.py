@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
+from fastapi import HTTPException
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
@@ -110,13 +111,21 @@ DEFINITIVOS = {
     "La ejecución requiere revisión por costo",
     "Configure GEMINI_API_KEY en el backend y el trabajador",
     "GEMINI_MODELO no válido",
+    "El segmento requiere aprobación",
+    "No hay contactos elegibles con base legal aprobada",
+    "El Segmentador propuso reglas no válidas",
 }
 
 
 def sin_reintento(exc: Exception) -> bool:
     if isinstance(exc, FalloProveedor):
         return not exc.reintentable
-    return isinstance(exc, ValueError) and str(exc) in DEFINITIVOS
+    # La secuencia ya se corrigió una vez dentro de la tarea; repetir cuesta y rara vez
+    # cambia el resultado. El administrador puede volver a pedirla.
+    return isinstance(exc, (ValueError, HTTPException)) and (
+        detalle_seguro(exc) in DEFINITIVOS
+        or detalle_seguro(exc).startswith("Secuencia no válida; requiere revisión")
+    )
 
 
 def detalle_seguro(exc: Exception) -> str:
@@ -125,6 +134,19 @@ def detalle_seguro(exc: Exception) -> str:
     if isinstance(exc, FalloProveedor):
         # Siempre se arma con textos fijos del backend (sin claves ni contenido externo).
         return str(exc)
+    if isinstance(exc, HTTPException) and exc.detail in (
+        "Regla de segmento no válida",
+        "Las reglas deben ser una lista",
+    ):
+        return "El Segmentador propuso reglas no válidas"
+    texto = str(exc)
+    if (
+        isinstance(exc, ValueError)
+        and texto.startswith("Secuencia no válida; requiere revisión")
+        and re.fullmatch(r"[\w\s{}.,:;()¿?¡!'\"-]{1,500}", texto)
+    ):
+        # Los motivos los escribe el validador de secuencias de este backend.
+        return texto
     permitidos = {
         "Configure los precios del proveedor para el modelo seleccionado",
         "Entrada excede el presupuesto por tarea",
@@ -137,8 +159,9 @@ def detalle_seguro(exc: Exception) -> str:
         "Gemini no aportó fuentes de búsqueda; no se guardaron empresas",
         "El modelo no devolvió una salida válida",
         "Tipo de tarea no registrado",
+        "El segmento requiere aprobación",
+        "No hay contactos elegibles con base legal aprobada",
     }
-    texto = str(exc)
     if isinstance(exc, ValueError) and (
         texto in permitidos
         or re.fullmatch(

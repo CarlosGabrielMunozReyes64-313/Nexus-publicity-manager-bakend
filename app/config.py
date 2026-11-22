@@ -26,6 +26,13 @@ class Config(BaseSettings):
     gemini_precios_json: str = '{"gemini-3.5-flash-lite":{"entrada":0.30,"salida":2.50}}'
     gemini_costo_busqueda_usd: float = Field(default=0.014, ge=0)
     descubrimiento_automatico: bool = False
+    # Buscador de Descubrimiento: auto = Tavily si hay TAVILY_API_KEY; si no, la búsqueda
+    # integrada del proveedor (Google con Gemini, web search con Claude).
+    buscador_descubrimiento: Literal["auto", "proveedor", "tavily"] = "auto"
+    tavily_api_key: SecretStr = SecretStr("")
+    tavily_consultas_max: int = Field(default=4, ge=1, le=10)
+    # Plan gratuito: 1.000 créditos al mes sin costo. Con pago por uso, ponga el precio.
+    tavily_costo_credito_usd: float = Field(default=0.0, ge=0)
     descubrimiento_limite_diario: int = Field(default=20, ge=1, le=100)
     descubrimiento_hora: int = Field(default=8, ge=0, le=23)
     anthropic_api_key: SecretStr = SecretStr("")

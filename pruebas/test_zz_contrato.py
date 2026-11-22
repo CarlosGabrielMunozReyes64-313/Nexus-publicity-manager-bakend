@@ -20,7 +20,7 @@ def test_todas_las_lecturas_con_datos(auth):
         insertar(c,'recomendaciones',{'texto':'Muestra insuficiente'})
         insertar(c,'puntajes',{'empresa_id':ct['empresa_id'],'total':0,'incompleto':True,'criterios':Jsonb([{'nombre':'Criterio','cumple':None,'peso':30,'explicacion':'Sin fuente'}]),'version_reglas':1})
         insertar(c,'interacciones',{'contacto_id':ct['id'],'tipo':'nota','resumen':'Nota de prueba'})
-    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica'}
+    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica','agentes/solicitudes':'solicitudAgente'}
     records=[]
     for path,schema in mappings.items():
         res=auth.get('/api/'+path)
