@@ -6,6 +6,7 @@ from app.dominio.reglas import BOGOTA
 
 def programar(c: Conn, ahora: datetime) -> None:
     from app.agentes.descubrimiento import programar_descubrimiento
+    from app.agentes.ejecutor import proveedor_ia_listo
 
     now = ahora.astimezone(BOGOTA)
     programar_descubrimiento(c, now)
@@ -28,9 +29,9 @@ def programar(c: Conn, ahora: datetime) -> None:
             if integracion in integraciones and (now.hour > 6 or now.minute >= 10):
                 encolar(c, tipo, {}, tipo + ":" + day, 7)
         encolar(c, "buscar_duplicados", {}, "duplicados:" + day, 6)
-        for e in todos(c, "SELECT id FROM empresas WHERE fusionada_en_id IS NULL"):
-            encolar(
-                c, "calcular_puntaje", {"empresaId": str(e["id"])}, f"puntaje:{day}:{e['id']}", 6
-            )
-    if now.weekday() == 0 and now.hour >= 7 and "claude" in integraciones:
+        # Una sola tarea diaria (clave única por día) recorre las empresas por páginas;
+        # el programador ya no recorre toda la tabla en cada vuelta del trabajador.
+        encolar(c, "calcular_puntajes", {"fecha": day}, "puntajes:" + day, 6)
+    # El informe semanal usa el proveedor de agentes activo (Claude o Gemini).
+    if now.weekday() == 0 and now.hour >= 7 and proveedor_ia_listo(integraciones):
         encolar(c, "informe_semanal", {}, "informe:" + now.date().isoformat(), 8)

@@ -1,14 +1,21 @@
+import re
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 from fastapi import HTTPException
+from psycopg import errors as pg_errors
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from app.api.lecturas import contacto, empresa
-from app.db import Conn, Row, actualizar, encolar, insertar, obtener, uno
+from app.db import Conn, Row, actualizar, encolar, insertar, obtener, todos, uno
 from app.dominio.reglas import ETAPAS, dominio, telefono
 from app.esquemas.entradas import Contacto, Empresa
 from app.esquemas.serializar import serializar
+
+CORREO = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+MAX_IMPORTACION = 5000
 
 
 def ahora() -> datetime:
@@ -153,12 +160,102 @@ def suprimir(c: Conn, body: Row, origen: str = "manual") -> None:
     )
 
 
+def importar_contactos(c: Conn, body: Any) -> dict[str, int]:
+    """Importa filas válidas y devuelve cuántas se crearon, omitieron o rechazaron.
+
+    Los duplicados se detectan con dos conjuntos (correos existentes y correos vistos),
+    de modo que cada fila se comprueba una sola vez. Un error general, como una empresa
+    inexistente, cancela toda la importación.
+    """
+    if not isinstance(body, dict) or not isinstance(body.get("contactos"), list):
+        raise HTTPException(400, "Envíe la lista de contactos a importar")
+    filas: list[Any] = body["contactos"]
+    if len(filas) > MAX_IMPORTACION:
+        raise HTTPException(400, f"Importe como máximo {MAX_IMPORTACION} filas por archivo")
+    empresas: set[str] = set()
+    for item in filas:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("baseLegal") or {}).get("tipo") == "autorizacion_formulario":
+            raise HTTPException(
+                400, "La autorización de formulario debe proceder del webhook firmado"
+            )
+        empresa = str(item.get("empresaId") or "")
+        try:
+            UUID(empresa)
+        except ValueError as exc:
+            raise HTTPException(400, "Seleccione una empresa válida para la importación") from exc
+        empresas.add(empresa)
+    if empresas:
+        validas = {
+            str(r["id"])
+            for r in todos(
+                c,
+                "SELECT id FROM empresas WHERE id=ANY(%s::uuid[]) AND fusionada_en_id IS NULL",
+                (sorted(empresas),),
+            )
+        }
+        if empresas - validas:
+            raise HTTPException(404, "Empresa no encontrada")
+    correos = sorted(
+        {"".join(str(x.get("correo") or "").lower().split()) for x in filas if isinstance(x, dict)}
+        - {""}
+    )
+    existentes = {
+        str(r["correo"]).lower()
+        for r in todos(
+            c,
+            "SELECT correo::text AS correo FROM contactos WHERE correo=ANY(%s::citext[])",
+            (correos,),
+        )
+    }
+    vistos: set[str] = set()
+    resultado = {"creados": 0, "omitidos": 0, "rechazados": 0}
+    for item in filas:
+        if not isinstance(item, dict):
+            resultado["rechazados"] += 1
+            continue
+        correo = "".join(str(item.get("correo") or "").lower().split())
+        nombre = str(item.get("nombre") or "").strip()
+        if not nombre or (correo and not CORREO.fullmatch(correo)):
+            resultado["rechazados"] += 1
+            continue
+        if correo and (correo in existentes or correo in vistos):
+            resultado["omitidos"] += 1
+            continue
+        if correo:
+            vistos.add(correo)
+        try:
+            with c.transaction():
+                guardar_contacto(c, {**item, "nombre": nombre, "correo": correo or None})
+            resultado["creados"] += 1
+        except pg_errors.UniqueViolation:
+            resultado["omitidos"] += 1
+        except (ValidationError, pg_errors.CheckViolation, pg_errors.NotNullViolation):
+            resultado["rechazados"] += 1
+    return resultado
+
+
+def descartar_duplicado(c: Conn, ident: str, admin: str) -> None:
+    d = obtener(c, "posibles_duplicados", ident, True)
+    if d["estado"] != "pendiente":
+        raise HTTPException(400, "Duplicado ya resuelto")
+    actualizar(
+        c,
+        "posibles_duplicados",
+        ident,
+        {"estado": "descartado", "resuelto_por": admin, "resuelto_en": ahora()},
+    )
+
+
 def fusionar(c: Conn, ident: str, body: Row, admin: str) -> None:
     d = obtener(c, "posibles_duplicados", ident, True)
     if d["estado"] != "pendiente":
         raise HTTPException(400, "Duplicado ya resuelto")
     a = obtener(c, "empresas", str(d["principal_id"]), True)
     b = obtener(c, "empresas", str(d["duplicado_id"]), True)
+    if a["fusionada_en_id"] or b["fusionada_en_id"]:
+        raise HTTPException(400, "Una de las empresas ya fue fusionada; descarte este duplicado")
     campos = {
         "razonSocial": "razon_social",
         "sector": "sector",
@@ -170,14 +267,32 @@ def fusionar(c: Conn, ident: str, body: Row, admin: str) -> None:
     if any(k not in campos or v not in ("principal", "duplicado") for k, v in body.items()):
         raise HTTPException(400, "Selección de campos no válida")
     actualizar(c, "empresas", str(b["id"]), {"fusionada_en_id": a["id"]})
-    actualizar(
-        c,
-        "empresas",
-        str(a["id"]),
-        {campos[k]: b[campos[k]] for k, v in body.items() if v == "duplicado"},
-    )
+    elegidos = {campos[k]: b[campos[k]] for k, v in body.items() if v == "duplicado"}
+    if "sitio_web" in elegidos and "dominio" not in elegidos:
+        elegidos["dominio"] = dominio(elegidos["sitio_web"]) if elegidos["sitio_web"] else None
+    actualizar(c, "empresas", str(a["id"]), elegidos)
     for tabla in ("contactos", "oportunidades", "senales", "evidencias"):
         c.execute(f"UPDATE {tabla} SET empresa_id=%s WHERE empresa_id=%s", (a["id"], b["id"]))
+    # Referencias que seguirían apuntando a la ficha fusionada.
+    c.execute(
+        "UPDATE resultados_descubrimiento SET posible_duplicado_de=%s WHERE posible_duplicado_de=%s",
+        (a["id"], b["id"]),
+    )
+    c.execute(
+        "UPDATE resultados_descubrimiento SET empresa_creada_id=%s WHERE empresa_creada_id=%s",
+        (a["id"], b["id"]),
+    )
+    c.execute(
+        "UPDATE propuestas SET objetivo_empresa_id=%s WHERE objetivo_empresa_id=%s",
+        (a["id"], b["id"]),
+    )
+    c.execute(
+        """UPDATE posibles_duplicados SET estado='descartado',resuelto_por=%s,resuelto_en=now()
+        WHERE estado='pendiente' AND id<>%s AND %s IN (principal_id,duplicado_id)""",
+        (admin, ident, b["id"]),
+    )
+    encolar(c, "calcular_puntaje", {"empresaId": str(a["id"])})
+    encolar(c, "buscar_duplicados", {"empresaId": str(a["id"])})
     actualizar(
         c,
         "posibles_duplicados",

@@ -20,10 +20,11 @@ from app.db import (
     transaccion,
     uno,
 )
-from app.dominio.reglas import BOGOTA, siguiente_ventana
+from app.dominio.reglas import BOGOTA, VentanaIncompatible, siguiente_ventana
 from app.esquemas.serializar import serializar
 from app.integraciones.conexiones import pausar_todo
 from app.integraciones.gmail import Gmail, GmailReal, message_id, mime
+from app.motor.pausas import pausar_campana
 from app.motor.plantillas import render
 from app.motor.rastreador import registrar
 from app.publico.rutas import firma_baja
@@ -87,130 +88,142 @@ def programar(reloj: Reloj | None = None, proveedor: Gmail | None = None) -> Non
         lim = limites(c)
         for ins in todos(
             c,
-            "SELECT i.* FROM inscripciones i JOIN campanas ca ON ca.id=i.campana_id WHERE i.estado='activa' AND ca.estado='activa' AND i.proximo_envio<=%s FOR UPDATE OF i SKIP LOCKED",
+            "SELECT i.* FROM inscripciones i JOIN campanas ca ON ca.id=i.campana_id WHERE i.estado='activa' AND ca.estado='activa' AND i.proximo_envio<=%s ORDER BY i.proximo_envio FOR UPDATE OF i SKIP LOCKED",
             (now,),
         ):
-            cam = obtener(c, "campanas", str(ins["campana_id"]), True)
-            ct = obtener(c, "contactos", str(ins["contacto_id"]), True)
-            if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ct["id"],))["motivo"]:
-                c.execute("SELECT detener_envios(ARRAY[%s]::uuid[],%s,false)", (ct["id"], "manual"))
-                continue
-            a = obtener(c, "aprobaciones_campana", str(cam["aprobacion_vigente_id"]))
-            frozen = a["contenido_congelado"]
-            seq = frozen["secuencia"]
-            target = siguiente_ventana(now, seq["ventanaEnvio"], lim["ventana"])
-            if topes(c, ins, cam, ct, now, lim):
-                target = siguiente_ventana(
-                    (now.astimezone(BOGOTA) + timedelta(days=1)).replace(
-                        hour=0, minute=0, second=0, microsecond=0
-                    ),
-                    seq["ventanaEnvio"],
-                    lim["ventana"],
-                )
-            if target > now:
-                actualizar(c, "inscripciones", str(ins["id"]), {"proximo_envio": target})
-                continue
-            if uno(
-                c,
-                "SELECT id FROM mensajes WHERE inscripcion_id=%s AND paso_orden=%s AND estado<>'cancelado'",
-                (ins["id"], ins["paso_actual"]),
-                False,
-            ):
-                continue
-            step = next((p for p in seq["pasos"] if p["orden"] == ins["paso_actual"]), None)
-            if not step:
-                actualizar(
-                    c,
-                    "inscripciones",
-                    str(ins["id"]),
-                    {
-                        "estado": "finalizada",
-                        "motivo_salida": "completada",
-                        "finalizada_en": now,
-                        "proximo_envio": None,
-                    },
-                )
-                continue
-            previous = uno(
-                c,
-                "SELECT * FROM mensajes WHERE inscripcion_id=%s AND estado='enviado' ORDER BY paso_orden DESC LIMIT 1",
-                (ins["id"],),
-                False,
-            )
-            hilo = previous.get("gmail_thread_id") if step["mismoHilo"] else None
-            if respondio(c, gmail, hilo):
-                continue
-            key = f"{ins['id']}:{ins['paso_actual']}:{a['id']}"
-            canceled = uno(
-                c,
-                "SELECT id FROM mensajes WHERE clave_idempotencia=%s AND estado='cancelado'",
-                (key,),
-                False,
-            )
-            mid = str(canceled["id"]) if canceled else str(uuid4())
-            ref = secrets.token_urlsafe(24)
-            baja = config().app_url + "/baja/" + firma_baja().dumps(mid)
-            e = serializar(lecturas.empresa(c, obtener(c, "empresas", str(ct["empresa_id"]))))
-            rendered = render(
-                seq,
-                serializar(lecturas.contacto(c, ct)),
-                e,
-                frozen["marca"],
-                baja,
-                config().app_url + "/r/" + ref,
-            )
-            rendered_step = next(p for p in rendered["pasos"] if p["orden"] == step["orden"])
-            last = uno(
-                c,
-                "SELECT max(coalesce(enviado_en,programado_para)) AS fecha FROM mensajes WHERE estado IN ('programado','enviando','enviado')",
-            )["fecha"]
-            target = max(now, last or now) + timedelta(
-                seconds=random.randint(*lim["separacionSegundos"])
-            )
-            target = siguiente_ventana(target, seq["ventanaEnvio"], lim["ventana"])
-            # Do not reserve tomorrow's quota from today's batch.
-            if target.astimezone(BOGOTA).date() != now.astimezone(BOGOTA).date():
-                actualizar(c, "inscripciones", str(ins["id"]), {"proximo_envio": target})
-                continue
-            asunto = rendered_step.get("asunto")
-            if hilo:
-                asunto = "Re: " + (previous.get("asunto") or "").removeprefix("Re: ")
-            mensaje_values = {
-                "id": mid,
-                "tipo": "secuencia",
-                "contacto_id": ct["id"],
-                "inscripcion_id": ins["id"],
-                "aprobacion_id": a["id"],
-                "paso_orden": step["orden"],
-                "clave_idempotencia": key,
-                "destinatario": ct["correo"],
-                "asunto": asunto,
-                "cuerpo": rendered_step["cuerpo"],
-                "programado_para": target,
-                "gmail_thread_id": hilo,
-            }
-            mensaje_values["estado"] = "programado"
-            if canceled:
-                mensaje_values.pop("id")
-                actualizar(c, "mensajes", mid, mensaje_values)
-            else:
-                insertar(c, "mensajes", mensaje_values)
-            insertar(
-                c,
-                "enlaces_seguimiento",
-                {
-                    "referencia": ref,
-                    "mensaje_id": mid,
-                    "url_destino": config().diagnostico_url,
-                    "utm_campaign": "cam-" + str(cam["id"])[:8],
-                    "utm_content": "paso-" + str(step["orden"]),
-                },
-            )
-            encolar(c, "enviar_mensaje", {"mensajeId": mid}, "enviar:" + mid, 2)
-            c.execute(
-                "UPDATE tareas SET ejecutar_desde=%s,estado='pendiente',terminada_en=NULL,intentos=0,tomada_por=NULL,tomada_en=NULL WHERE clave_unica=%s AND estado<>'en_proceso'",
-                (target, "enviar:" + mid),
-            )
+            # Cada inscripción en su propio punto de guardado: una campaña incompatible
+            # se aísla y se pausa sin revertir lo programado para las demás.
+            try:
+                with c.transaction():
+                    programar_inscripcion(c, ins, now, gmail, lim)
+            except VentanaIncompatible:
+                pausar_campana(c, str(ins["campana_id"]))
+
+
+def programar_inscripcion(c: Conn, ins: Row, now: datetime, gmail: Gmail, lim: Row) -> None:
+    actual = obtener(c, "inscripciones", str(ins["id"]), True)
+    cam = obtener(c, "campanas", str(ins["campana_id"]), True)
+    if actual["estado"] != "activa" or cam["estado"] != "activa":
+        return
+    ins = actual
+    ct = obtener(c, "contactos", str(ins["contacto_id"]), True)
+    if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ct["id"],))["motivo"]:
+        c.execute("SELECT detener_envios(ARRAY[%s]::uuid[],%s,false)", (ct["id"], "manual"))
+        return
+    a = obtener(c, "aprobaciones_campana", str(cam["aprobacion_vigente_id"]))
+    frozen = a["contenido_congelado"]
+    seq = frozen["secuencia"]
+    target = siguiente_ventana(now, seq["ventanaEnvio"], lim["ventana"])
+    if topes(c, ins, cam, ct, now, lim):
+        target = siguiente_ventana(
+            (now.astimezone(BOGOTA) + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ),
+            seq["ventanaEnvio"],
+            lim["ventana"],
+        )
+    if target > now:
+        actualizar(c, "inscripciones", str(ins["id"]), {"proximo_envio": target})
+        return
+    if uno(
+        c,
+        "SELECT id FROM mensajes WHERE inscripcion_id=%s AND paso_orden=%s AND estado<>'cancelado'",
+        (ins["id"], ins["paso_actual"]),
+        False,
+    ):
+        return
+    step = next((p for p in seq["pasos"] if p["orden"] == ins["paso_actual"]), None)
+    if not step:
+        actualizar(
+            c,
+            "inscripciones",
+            str(ins["id"]),
+            {
+                "estado": "finalizada",
+                "motivo_salida": "completada",
+                "finalizada_en": now,
+                "proximo_envio": None,
+            },
+        )
+        return
+    previous = uno(
+        c,
+        "SELECT * FROM mensajes WHERE inscripcion_id=%s AND estado='enviado' ORDER BY paso_orden DESC LIMIT 1",
+        (ins["id"],),
+        False,
+    )
+    hilo = previous.get("gmail_thread_id") if step["mismoHilo"] else None
+    if respondio(c, gmail, hilo):
+        return
+    key = f"{ins['id']}:{ins['paso_actual']}:{a['id']}"
+    canceled = uno(
+        c,
+        "SELECT id FROM mensajes WHERE clave_idempotencia=%s AND estado='cancelado'",
+        (key,),
+        False,
+    )
+    mid = str(canceled["id"]) if canceled else str(uuid4())
+    ref = secrets.token_urlsafe(24)
+    baja = config().app_url + "/baja/" + firma_baja().dumps(mid)
+    e = serializar(lecturas.empresa(c, obtener(c, "empresas", str(ct["empresa_id"]))))
+    rendered = render(
+        seq,
+        serializar(lecturas.contacto(c, ct)),
+        e,
+        frozen["marca"],
+        baja,
+        config().app_url + "/r/" + ref,
+    )
+    rendered_step = next(p for p in rendered["pasos"] if p["orden"] == step["orden"])
+    last = uno(
+        c,
+        "SELECT max(coalesce(enviado_en,programado_para)) AS fecha FROM mensajes WHERE estado IN ('programado','enviando','enviado')",
+    )["fecha"]
+    target = max(now, last or now) + timedelta(seconds=random.randint(*lim["separacionSegundos"]))
+    target = siguiente_ventana(target, seq["ventanaEnvio"], lim["ventana"])
+    # Do not reserve tomorrow's quota from today's batch.
+    if target.astimezone(BOGOTA).date() != now.astimezone(BOGOTA).date():
+        actualizar(c, "inscripciones", str(ins["id"]), {"proximo_envio": target})
+        return
+    asunto = rendered_step.get("asunto")
+    if hilo:
+        asunto = "Re: " + (previous.get("asunto") or "").removeprefix("Re: ")
+    mensaje_values = {
+        "id": mid,
+        "tipo": "secuencia",
+        "contacto_id": ct["id"],
+        "inscripcion_id": ins["id"],
+        "aprobacion_id": a["id"],
+        "paso_orden": step["orden"],
+        "clave_idempotencia": key,
+        "destinatario": ct["correo"],
+        "asunto": asunto,
+        "cuerpo": rendered_step["cuerpo"],
+        "programado_para": target,
+        "gmail_thread_id": hilo,
+    }
+    mensaje_values["estado"] = "programado"
+    if canceled:
+        mensaje_values.pop("id")
+        actualizar(c, "mensajes", mid, mensaje_values)
+    else:
+        insertar(c, "mensajes", mensaje_values)
+    insertar(
+        c,
+        "enlaces_seguimiento",
+        {
+            "referencia": ref,
+            "mensaje_id": mid,
+            "url_destino": config().diagnostico_url,
+            "utm_campaign": "cam-" + str(cam["id"])[:8],
+            "utm_content": "paso-" + str(step["orden"]),
+        },
+    )
+    encolar(c, "enviar_mensaje", {"mensajeId": mid}, "enviar:" + mid, 2)
+    c.execute(
+        "UPDATE tareas SET ejecutar_desde=%s,estado='pendiente',terminada_en=NULL,intentos=0,tomada_por=NULL,tomada_en=NULL WHERE clave_unica=%s AND estado<>'en_proceso'",
+        (target, "enviar:" + mid),
+    )
 
 
 def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = None) -> None:
@@ -262,9 +275,14 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                     if m["tipo"] == "secuencia":
                         approval = obtener(c, "aprobaciones_campana", str(m["aprobacion_id"]))
                         frozen_seq = approval["contenido_congelado"]["secuencia"]
-                        valid_at = siguiente_ventana(
-                            now, frozen_seq["ventanaEnvio"], lim["ventana"]
-                        )
+                        try:
+                            valid_at = siguiente_ventana(
+                                now, frozen_seq["ventanaEnvio"], lim["ventana"]
+                            )
+                        except VentanaIncompatible:
+                            # Aísla la campaña: cancela lo programado y no envía este mensaje.
+                            pausar_campana(c, str(approval["campana_id"]))
+                            return
                         counts = uno(
                             c,
                             """SELECT count(*) FILTER(WHERE paso_orden=1) AS nuevos,
@@ -286,13 +304,17 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                                 or counts["campana"] >= cam["tope_diario"]
                             )
                         ) or counts["dominio"] >= lim["topePorDominio"]:
-                            valid_at = siguiente_ventana(
-                                (now.astimezone(BOGOTA) + timedelta(days=1)).replace(
-                                    hour=0, minute=0, second=0, microsecond=0
-                                ),
-                                frozen_seq["ventanaEnvio"],
-                                lim["ventana"],
-                            )
+                            try:
+                                valid_at = siguiente_ventana(
+                                    (now.astimezone(BOGOTA) + timedelta(days=1)).replace(
+                                        hour=0, minute=0, second=0, microsecond=0
+                                    ),
+                                    frozen_seq["ventanaEnvio"],
+                                    lim["ventana"],
+                                )
+                            except VentanaIncompatible:
+                                pausar_campana(c, str(approval["campana_id"]))
+                                return
                         if valid_at > now:
                             actualizar(c, "mensajes", ident, {"programado_para": valid_at})
                             return
@@ -417,18 +439,33 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                     )
                     if ins["estado"] == "activa":
                         if nextstep:
-                            nxt = siguiente_ventana(
-                                now,
-                                seq["ventanaEnvio"],
-                                limites(c)["ventana"],
-                                nextstep["esperaDiasHabiles"],
-                            )
-                            actualizar(
-                                c,
-                                "inscripciones",
-                                str(ins["id"]),
-                                {"paso_actual": nextstep["orden"], "proximo_envio": nxt},
-                            )
+                            try:
+                                nxt = siguiente_ventana(
+                                    now,
+                                    seq["ventanaEnvio"],
+                                    limites(c)["ventana"],
+                                    nextstep["esperaDiasHabiles"],
+                                )
+                                actualizar(
+                                    c,
+                                    "inscripciones",
+                                    str(ins["id"]),
+                                    {"paso_actual": nextstep["orden"], "proximo_envio": nxt},
+                                )
+                            except VentanaIncompatible:
+                                # El correo ya salió: se registra como enviado y solo se pausa
+                                # la campaña, conservando el paso siguiente para reanudar.
+                                actualizar(
+                                    c,
+                                    "inscripciones",
+                                    str(ins["id"]),
+                                    {
+                                        "paso_actual": nextstep["orden"],
+                                        "proximo_envio": None,
+                                        "estado": "pausada",
+                                    },
+                                )
+                                pausar_campana(c, str(ins["campana_id"]))
                         else:
                             actualizar(
                                 c,

@@ -32,7 +32,8 @@ def test_aprobacion_versionado(auth):
     assert p['estado']=='pendiente' and p['version']==2
     assert auth.post(f"/api/propuestas/{prop['id']}/aprobar",json={}).status_code==200
     out=Path('pruebas/salidas/contratos.json')
-    records=json.loads(out.read_text())
+    out.parent.mkdir(parents=True,exist_ok=True)
+    records=json.loads(out.read_text()) if out.exists() else []
     for resource,schema,ident in [('segmentos','segmento',seg['id']),('secuencias','secuencia',seq['id']),('campanas','campana',cam['id']),('propuestas','propuesta',prop['id'])]:
         for path in (resource,resource+'/'+str(ident)):
             response=auth.get('/api/'+path)

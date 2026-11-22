@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 import httpx
@@ -53,7 +54,50 @@ def pausar_todo(c: Conn, detalle: str) -> None:
     c.execute("UPDATE integraciones SET detalle=%s WHERE id='gmail'", (detalle,))
 
 
-def cambiar(c: Conn, ident: str, accion: str) -> None:
+DESCONECTADA = {
+    "gmail": "Desconectada por el administrador: autorización revocada en Google y campañas activas en pausa.",
+    "formulario": "Desconectado: el receptor rechaza los envíos del sitio hasta volver a conectarlo.",
+    "verificador": "Desconectado: los correos nuevos solo se comprueban por sintaxis y DNS.",
+    "claude": "Desconectado: el informe semanal automático no se programa con Claude.",
+    "ga4": "Desconectado: no se importan visitas de Google Analytics.",
+    "search_console": "Desconectado: no se importan consultas de Search Console.",
+}
+
+
+def probar_proveedor_ia() -> tuple[str, str]:
+    """Llamada mínima al proveedor de agentes activo. Devuelve (secreto, detalle)."""
+    cfg = config()
+    if cfg.agente_proveedor == "gemini":
+        secret = cfg.gemini_api_key.get_secret_value()
+        if not secret:
+            raise ValueError("Configure GEMINI_API_KEY en el servidor")
+        if not re.fullmatch(r"[a-zA-Z0-9._-]+", cfg.gemini_modelo):
+            raise ValueError("GEMINI_MODELO no válido")
+        httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_modelo}:generateContent",
+            headers={"x-goog-api-key": secret},
+            json={
+                "contents": [{"role": "user", "parts": [{"text": "Responde OK."}]}],
+                "generationConfig": {"maxOutputTokens": 8},
+            },
+            timeout=30,
+        ).raise_for_status()
+        return secret, "Conexión comprobada con Gemini (proveedor activo de agentes)"
+    from anthropic import Anthropic
+
+    secret = cfg.anthropic_api_key.get_secret_value()
+    if not secret:
+        raise ValueError("Configure ANTHROPIC_API_KEY en el servidor")
+    Anthropic(api_key=secret).messages.create(
+        model=cfg.claude_modelo_ligero,
+        max_tokens=8,
+        messages=[{"role": "user", "content": "Responde OK."}],
+    )
+    return secret, "Conexión comprobada con Claude (proveedor activo de agentes)"
+
+
+def cambiar(c: Conn, ident: str, accion: str) -> dict[str, str]:
+    """Conecta o desconecta una integración y devuelve el estado real resultante."""
     r = obtener(c, "integraciones", ident, True)
     cfg = config()
     if accion == "desconectar":
@@ -67,36 +111,35 @@ def cambiar(c: Conn, ident: str, accion: str) -> None:
                 if response.status_code not in (200, 400):
                     raise HTTPException(502, "Google no confirmó la revocación; vuelva a intentar")
             pausar_todo(c, "Gmail desconectado por el administrador")
+        detalle = DESCONECTADA.get(ident, "Desconectada por el administrador")
         actualizar(
-            c, "integraciones", ident, {"estado": "desconectada", "credenciales_cifradas": None}
+            c,
+            "integraciones",
+            ident,
+            {"estado": "desconectada", "credenciales_cifradas": None, "detalle": detalle},
         )
-        return
+        return {"estado": "desconectada", "detalle": detalle}
+    detalle = "Conexión comprobada"
     try:
         secret = ""
         if ident == "gmail":
+            # Gmail se conecta con OAuth; aquí solo se comprueba una conexión existente.
             gmail(c).users().getProfile(userId="me").execute()
-            return
+            actualizar(c, "integraciones", ident, {"detalle": detalle})
+            return {"estado": str(r["estado"]), "detalle": detalle}
         if ident == "verificador":
             secret = cfg.hunter_api_key.get_secret_value()
             if not secret:
-                raise ValueError("Configure HUNTER_API_KEY")
+                raise ValueError("Configure HUNTER_API_KEY en el servidor")
             httpx.get(
                 "https://api.hunter.io/v2/account", params={"api_key": secret}, timeout=15
             ).raise_for_status()
         elif ident == "formulario":
             if not cfg.formulario_webhook_secreto.get_secret_value():
-                raise ValueError("Configure FORMULARIO_WEBHOOK_SECRETO")
+                raise ValueError("Configure FORMULARIO_WEBHOOK_SECRETO en el servidor")
+            detalle = "Conectado: el receptor acepta envíos firmados del sitio"
         elif ident == "claude":
-            from anthropic import Anthropic
-
-            secret = cfg.anthropic_api_key.get_secret_value()
-            if not secret:
-                raise ValueError("Configure ANTHROPIC_API_KEY")
-            Anthropic(api_key=secret).messages.create(
-                model=cfg.claude_modelo_ligero,
-                max_tokens=8,
-                messages=[{"role": "user", "content": "Responde OK."}],
-            )
+            secret, detalle = probar_proveedor_ia()
         elif ident == "ga4":
             secret = cfg.google_cuenta_servicio_json.get_secret_value()
             service = build(
@@ -129,17 +172,19 @@ def cambiar(c: Conn, ident: str, accion: str) -> None:
             ident,
             {
                 "estado": "conectada",
-                "detalle": "Conexión comprobada",
+                "detalle": detalle,
                 "credenciales_cifradas": cifrar(secret) if secret else None,
             },
         )
-    except Exception:
-        actualizar(
-            c,
-            "integraciones",
-            ident,
-            {
-                "estado": "error",
-                "detalle": "No se pudo comprobar la conexión. Revise credenciales, permisos y disponibilidad del proveedor.",
-            },
+        return {"estado": "conectada", "detalle": detalle}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Los ValueError son mensajes propios (nunca contienen secretos).
+        detalle = (
+            str(exc)
+            if isinstance(exc, ValueError)
+            else "No se pudo comprobar la conexión. Revise credenciales, permisos y disponibilidad del proveedor."
         )
+        actualizar(c, "integraciones", ident, {"estado": "error", "detalle": detalle})
+        return {"estado": "error", "detalle": detalle}

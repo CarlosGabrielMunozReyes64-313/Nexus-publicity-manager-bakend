@@ -97,6 +97,34 @@ class ClaudeFalso:
         return schema.model_validate(self.salida), self.uso
 
 
+def precios_de(modelo: str, precios_json: str) -> dict[str, Any] | None:
+    try:
+        precios = json.loads(precios_json or "{}").get(modelo)
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(precios, dict) or not precios.get("entrada") or not precios.get("salida"):
+        return None
+    return precios
+
+
+def proveedor_ia_listo(integraciones_conectadas: set[str]) -> bool:
+    """¿Puede ejecutarse hoy una tarea automática de agentes con el proveedor activo?
+
+    Gemini se habilita por configuración del servidor (igual que el descubrimiento
+    automático). Claude exige además su integración conectada en Configuración.
+    """
+    cfg = config()
+    if cfg.agente_proveedor == "gemini":
+        return bool(cfg.gemini_api_key.get_secret_value()) and bool(
+            precios_de(cfg.gemini_modelo, cfg.gemini_precios_json)
+        )
+    return (
+        "claude" in integraciones_conectadas
+        and bool(cfg.anthropic_api_key.get_secret_value())
+        and bool(precios_de(cfg.claude_modelo_mayor, cfg.claude_precios_json))
+    )
+
+
 def costo(uso: dict[str, Any], precios: dict[str, Any]) -> float:
     keys = {
         "input_tokens": "entrada",
@@ -131,8 +159,8 @@ def ejecutar(
         if gemini
         else (cfg.claude_modelo_ligero if ligero else cfg.claude_modelo_mayor)
     )
-    precios = json.loads(cfg.gemini_precios_json if gemini else cfg.claude_precios_json).get(model)
-    if not precios or not precios.get("entrada") or not precios.get("salida"):
+    precios = precios_de(model, cfg.gemini_precios_json if gemini else cfg.claude_precios_json)
+    if not precios:
         raise ValueError("Configure los precios del proveedor para el modelo seleccionado")
     payload = (
         "<datos_no_confiables>"

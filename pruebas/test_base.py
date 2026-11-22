@@ -60,7 +60,10 @@ def test_serializador():
     assert r['creadoEn'].endswith('+00:00')
 
 
-def test_frontend_real(client):
+def test_frontend_real(client, tmp_path, monkeypatch):
+    # Frontend compilado mínimo: la prueba no depende de haber ejecutado «npm run build».
+    (tmp_path / 'index.html').write_text('<div id="root"></div>', encoding='utf-8')
+    monkeypatch.setattr(config(), 'frontend_dist', str(tmp_path))
     assert client.get('/login').status_code == 200
     assert 'root' in client.get('/contactos').text
     client.get('/api/auth/google')

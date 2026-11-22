@@ -192,20 +192,32 @@ def intercambio(request: Request, finalidad: str) -> tuple[dict[str, Any], dict[
         response.raise_for_status()
         tokens = response.json()
     claims = verify_oauth2_token(tokens["id_token"], GoogleRequest(), cfg.google_client_id)  # type: ignore[no-untyped-call]
-    if (
-        claims.get("nonce") != row["nonce"]
-        or not claims.get("email_verified")
-        or str(claims.get("email", "")).strip().lower() != cfg.admin_correo.strip().lower()
-    ):
+    correo = str(claims.get("email", "")).strip().lower()
+    if claims.get("nonce") != row["nonce"] or not claims.get("email_verified") or not correo:
         raise HTTPException(403, "Cuenta no autorizada")
-    tokens["correo"] = claims["email"].lower()
+    tokens["correo"] = correo
+    tokens["hd"] = str(claims.get("hd") or "").lower()
     return tokens, row
+
+
+def correo_admitido(correo: str, hd: str) -> bool:
+    """El administrador configurado siempre; otros, solo del dominio de Workspace permitido.
+
+    La lista final de personas autorizadas está en nexus.administradores (activos).
+    """
+    cfg = config()
+    if correo == cfg.admin_correo.strip().lower():
+        return True
+    dominio = cfg.google_dominio_permitido.strip().lower()
+    return bool(dominio) and correo.endswith("@" + dominio) and hd == dominio
 
 
 @router.get("/auth/google/callback")
 def callback(request: Request) -> RedirectResponse:
     try:
         tokens, _ = intercambio(request, "login")
+        if not correo_admitido(tokens["correo"], tokens["hd"]):
+            raise HTTPException(403, "Cuenta no autorizada")
         with transaccion() as c:
             r = uno(
                 c, "SELECT id FROM administradores WHERE correo=%s AND activo", (tokens["correo"],)
@@ -217,22 +229,49 @@ def callback(request: Request) -> RedirectResponse:
         return RedirectResponse(config().app_url + "/login?error=acceso_denegado", status_code=302)
 
 
-@router.get("/integraciones/gmail/callback")
-def gmail_callback(request: Request) -> RedirectResponse:
-    tokens, row = intercambio(request, "gmail")
-    admin = administrador(request)
-    if (
-        admin != str(row["administrador_id"])
-        or tokens["correo"] != config().gmail_cuenta_envio.lower()
-    ):
-        raise HTTPException(403, "La cuenta no coincide con la cuenta de envío")
-    if not tokens.get("refresh_token"):
-        raise HTTPException(400, "Google no entregó permiso sin conexión; vuelva a autorizar")
-    with transaccion("admin", admin, "conectar_gmail") as c:
-        c.execute(
-            "UPDATE integraciones SET credenciales_cifradas=%s,cuenta=%s,permisos=%s,estado='conectada',detalle=NULL WHERE id='gmail'",
-            (cifrar(tokens["refresh_token"]), tokens["correo"], tokens.get("scope", "").split()),
-        )
-    response = RedirectResponse(config().app_url + "/configuracion", status_code=302)
+GMAIL_PERMISOS = {
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+}
+
+
+def volver_a_configuracion(resultado: str) -> RedirectResponse:
+    response = RedirectResponse(
+        config().app_url + "/configuracion?gmail=" + resultado, status_code=302
+    )
     response.delete_cookie("nexus_oauth", path="/api")
     return response
+
+
+@router.get("/integraciones/gmail/callback")
+def gmail_callback(request: Request) -> RedirectResponse:
+    """Vuelve siempre a Configuración con un resultado legible, nunca con JSON crudo."""
+    if request.query_params.get("error"):
+        return volver_a_configuracion("cancelado")
+    try:
+        tokens, row = intercambio(request, "gmail")
+    except (HTTPException, ValueError, KeyError, httpx.HTTPError):
+        return volver_a_configuracion("solicitud")
+    try:
+        admin = administrador(request)
+    except HTTPException:
+        return volver_a_configuracion("sesion")
+    cuenta = config().gmail_cuenta_envio.strip().lower()
+    if admin != str(row["administrador_id"]) or not cuenta or tokens["correo"] != cuenta:
+        return volver_a_configuracion("cuenta")
+    if not tokens.get("refresh_token"):
+        return volver_a_configuracion("sin_conexion")
+    permisos = set(str(tokens.get("scope", "")).split())
+    if not GMAIL_PERMISOS <= permisos:
+        return volver_a_configuracion("permisos")
+    with transaccion("admin", admin, "conectar_gmail") as c:
+        c.execute(
+            "UPDATE integraciones SET credenciales_cifradas=%s,cuenta=%s,permisos=%s,estado='conectada',detalle=%s WHERE id='gmail'",
+            (
+                cifrar(tokens["refresh_token"]),
+                tokens["correo"],
+                sorted(permisos),
+                "Conectada con " + tokens["correo"],
+            ),
+        )
+    return volver_a_configuracion("conectado")

@@ -1,65 +1,87 @@
-# Nexus Publicity Manager — frontend y backend integrado
+# Nexus Publicity Manager — backend (API, trabajador y frontend integrado)
 
-Aplicación React + FastAPI + PostgreSQL 16, con API y frontend en el mismo origen. Incluye el frontend adjunto, el esquema SQL original, migraciones, autenticación Google, datos, campañas, motor de correo, agentes, analítica, trabajador y pruebas.
+Aplicación React + FastAPI + PostgreSQL 16. Este repositorio contiene la API, el trabajador, el esquema SQL, migraciones, integraciones y pruebas. El frontend vive en su propio repositorio/ZIP; Docker lo compila y lo sirve desde el mismo origen que la API.
 
-**Estado de entrega:** implementación integrada para instalación y validación. Los resultados ejecutados están en `VALIDACION.md`. No se certifica como producción: faltan pruebas con las cuentas reales, el recorrido de navegador y los casos pendientes descritos en `DECISIONES.md`. No se enviaron correos reales durante el desarrollo.
+**Estado de entrega:** los resultados ejecutados están en `VALIDACION.md` y los límites conocidos en `DECISIONES.md`. No se enviaron correos reales durante el desarrollo.
+
+## Estructura de carpetas esperada
+
+Extraiga los dos ZIP en la **misma carpeta**, sin renombrarlos:
+
+```
+mi-carpeta/
+  Nexus-publicity-manager-bakend-main/   ← este backend (Nexus-publicity-manager-bakend-main.zip)
+  Nexus-publicity-manager-main/          ← frontend (Nexus-publicity-manager-main.zip)
+```
+
+También funciona con clones de Git (`Nexus-publicity-manager-bakend` y `Nexus-publicity-manager`) o con el frontend en `frontend/` dentro del backend: `python scripts/entorno_desarrollo.py` busca la carpeta cuyo `package.json` se llama `nexus-publicity-manager` y escribe su ruta en `.env` (`FRONTEND_DIR` y `FRONTEND_DIST`). Si está en otro lugar, edite esas dos variables.
 
 ## Arranque rápido con Docker
 
-Requisitos: Docker con Compose y Python 3 para generar secretos. Desde esta carpeta:
+Requisitos: Docker con Compose v2.17 o superior (BuildKit) y Python 3 para generar el `.env`. Desde `Nexus-publicity-manager-bakend-main/`:
 
 ```bash
-python scripts/entorno_desarrollo.py
+python scripts/entorno_desarrollo.py      # crea .env con claves y detecta el frontend
 docker compose up --build -d
 docker compose exec app python scripts/demo.py
 ```
 
 Abra http://localhost:8000 y pulse el acceso de Google. En desarrollo, `AUTH_DEV_BYPASS=true` crea una sesión local del administrador sin llamar a Google. Los datos de ejemplo no tienen correos verificados ni bases legales aprobadas; Gmail empieza desconectado.
 
-`entorno_desarrollo.py` genera claves y contraseñas aleatorias, no sobrescribe un `.env` existente y restringe sus permisos. No publique `.env`. El Compose arranca PostgreSQL, aplica las migraciones con `nexus_owner`, crea `nexus_app` con privilegios limitados y arranca API y trabajador con ese rol. El puerto solo se expone en localhost.
+Compose compila el frontend tomando `FRONTEND_DIR` (por defecto `../Nexus-publicity-manager-main`) como contexto adicional de construcción, arranca PostgreSQL, aplica las migraciones con `nexus_owner`, crea `nexus_app` con privilegios limitados y arranca API y trabajador con ese rol. El puerto solo se expone en localhost. `entorno_desarrollo.py` no sobrescribe un `.env` existente (solo actualiza la ruta del frontend) y restringe sus permisos; no publique `.env`.
+
+Sin Compose: `docker build --build-context frontend=../Nexus-publicity-manager-main -t nexus .`
 
 ```bash
 docker compose logs -f app
 docker compose exec app python scripts/encolar.py buscar_duplicados
 ```
 
-El Dockerfile compila el frontend con `VITE_USE_MOCKS=false`; no define `VITE_API_URL`. El frontend usa `/api`. Si antes utilizó MSW en ese mismo origen, elimine el service worker de demostración desde las herramientas del navegador.
+La imagen compila el frontend con `VITE_USE_MOCKS=false` y `VITE_API_URL=/api` (mismo origen, sin CORS). Si antes utilizó la demostración con MSW en ese mismo origen, elimine el service worker desde las herramientas del navegador.
 
 ## Instalación sin Docker
 
-Requisitos: Python 3.12, PostgreSQL 16+, Node 24 y npm. Cree una base vacía con un usuario propietario de migraciones.
+Requisitos: Python 3.12, PostgreSQL 16+, Node 22.12+ y npm. Cree una base vacía con un usuario propietario de migraciones. Desde `Nexus-publicity-manager-bakend-main/`:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate                 # Windows: .venv\Scripts\activate
 pip install -r requirements.lock
 pip install --no-deps -e .
-python scripts/entorno_desarrollo.py
+python scripts/entorno_desarrollo.py      # .env + FRONTEND_DIR/FRONTEND_DIST
 ```
 
-Edite `DATABASE_URL` en `.env` para apuntar inicialmente al dueño de esa base. Ejecute:
+Edite `DATABASE_URL` en `.env` para apuntar inicialmente al dueño de esa base y ejecute:
 
 ```bash
 alembic upgrade head
 python scripts/crear_rol.py
 ```
 
-Cambie después `DATABASE_URL` al usuario `nexus_app` y su `DB_APP_PASSWORD`. Compile el frontend:
+Cambie después `DATABASE_URL` al usuario `nexus_app` y su `DB_APP_PASSWORD`. Compile el frontend **en su propia carpeta**:
 
 ```bash
-cd frontend
+cd ../Nexus-publicity-manager-main
 npm ci
-VITE_USE_MOCKS=false npm run build
-cd ..
+VITE_USE_MOCKS=false npm run build        # PowerShell: $env:VITE_USE_MOCKS="false"; npm run build
+cd ../Nexus-publicity-manager-bakend-main
 python scripts/demo.py
 honcho start
 ```
 
-En Windows puede usar Docker o activar `.venv\Scripts\activate`; para variables de entorno use la sintaxis de PowerShell. La API se sirve en el puerto 8000. `/health` comprueba PostgreSQL; `/api/docs` solo existe en desarrollo.
+El backend sirve la carpeta indicada en `FRONTEND_DIST` (relativa a este backend, por ejemplo `../Nexus-publicity-manager-main/dist`); si queda vacía, usa `frontend/dist` dentro del backend (como en Docker). La API se sirve en el puerto 8000. `/health` comprueba PostgreSQL; `/api/docs` solo existe en desarrollo.
+
+Para desarrollar el frontend con Vite contra este backend, defina `APP_URL=http://localhost:5173` y siga el README del frontend (Vite reenvía `/api`, `/baja`, `/r` y `/health`).
+
+### Railway + Vercel
+
+`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **no añade migraciones**: basta con desplegar el código. En Railway, `APP_URL` debe ser el dominio público de Vercel de ese entorno. En Vercel, el destino del backend se define por entorno con `NEXUS_BACKEND_URL` (ver README del frontend); ya no hay una dirección fija en el repositorio.
+
+Después de actualizar, el receptor del formulario respeta el estado de la integración «Formulario». Si el secreto está configurado y nadie había tocado esa integración, el primer arranque la deja conectada para no cortar la captación; una desconexión explícita del administrador siempre se respeta.
 
 ## Configuración de producción
 
-Defina `APP_ENV=production`, `APP_URL=https://su-dominio`, `AUTH_DEV_BYPASS=false`, los secretos y las credenciales reales. La aplicación rechaza producción con bypass o HTTP. Use HTTPS mediante un proxy, respaldos de PostgreSQL y un gestor de secretos. Ejecute migraciones con el propietario y la aplicación con `nexus_app`. `requirements.lock` registra las versiones de Python utilizadas; `frontend/package-lock.json` fija las dependencias web.
+Defina `APP_ENV=production`, `APP_URL=https://su-dominio`, `AUTH_DEV_BYPASS=false`, los secretos y las credenciales reales. La aplicación rechaza producción con bypass o HTTP. Use HTTPS mediante un proxy, respaldos de PostgreSQL y un gestor de secretos. Ejecute migraciones con el propietario y la aplicación con `nexus_app`. `requirements.lock` registra las versiones de Python utilizadas; el `package-lock.json` del frontend fija las dependencias web.
 
 La base no puede modificarse desde las propuestas de un modelo: los agentes entregan datos estructurados y propuestas; solo las rutas de administrador aprueban. Gmail se utiliza exclusivamente desde el motor. El trabajador inicia campañas únicamente si se activaron explícitamente y existe aprobación vigente.
 
@@ -140,6 +162,8 @@ r.raise_for_status()
 
 Reintente con el mismo `id` si falla la red: no duplica el registro. La firma vence en cinco minutos. La autorización del formulario siempre queda pendiente de aprobación administrativa.
 
+El receptor solo guarda datos con la integración «Formulario» conectada (Configuración → Integraciones, donde también aparece la dirección exacta del webhook con un botón para copiarla). Desconectada, cualquier envío —aunque esté bien firmado— recibe 503 y no crea contactos; el sitio puede reintentarlo más tarde con el mismo `id`.
+
 ## Variables
 
 Todas están enumeradas en `.env.example` y validadas en `app/config.py`. Las obligatorias son APP_URL, DATABASE_URL, CLAVE_CIFRADO, SESION_SECRETO y ADMIN_CORREO; producción exige además OAuth Google. Las credenciales de cada integración se requieren al conectarla, no para utilizar el resto de la aplicación.
@@ -152,16 +176,23 @@ Las pruebas crean y eliminan una base temporal aleatoria. `TEST_ADMIN_DATABASE_U
 
 ```bash
 TEST_ADMIN_DATABASE_URL=postgresql://usuario:clave@localhost:5432/postgres pytest -q
-ruff check app
+ruff check app && ruff format --check app
 mypy app
-cd frontend
-npx tsx scripts/validar_contrato.ts
-VITE_API_URL=http://localhost/api VITE_USE_MOCKS=true npm test -- --maxWorkers=2
+cd ../Nexus-publicity-manager-main
+npx tsx scripts/validar_contrato.ts ../Nexus-publicity-manager-bakend-main/pruebas/salidas/contratos.json
+npm test
 npm run lint
 VITE_USE_MOCKS=false npm run build
 ```
 
-El `VITE_API_URL` absoluto es solo para los tests del frontend, que construyen Request de Node; no lo use al compilar la aplicación de mismo origen. El script de contratos valida las respuestas reales guardadas por pytest, no datos del mock.
+`pruebas/test_correcciones.py` cubre los defectos corregidos: importación CSV, conversiones en días sin envíos, costos con dos campañas el mismo día, horario global incompatible, auditoría más allá de 500 acciones, desconexión real con proveedor de prueba, bajas, respuestas solo HTML, recuperación de Gmail tras una desconexión larga, informe semanal por proveedor y rendimiento de listados y puntajes.
+
+Prueba de arranque desde la estructura que recibe el usuario: extrae los dos ZIP en una carpeta temporal, prepara `.env`, valida `docker compose config`, ejecuta las pruebas del backend, instala, prueba y compila el frontend, migra una base temporal, arranca la API y comprueba `/health`, la aplicación y la API.
+
+```bash
+TEST_ADMIN_DATABASE_URL=postgresql://usuario:clave@localhost:5432/postgres \
+  python scripts/probar_arranque.py ruta/al/Nexus-publicity-manager-bakend-main.zip ruta/al/Nexus-publicity-manager-main.zip
+```
 
 Para los 37 casos originales, use una base adicional vacía:
 
@@ -183,6 +214,5 @@ Para el recorrido de navegador, instale Playwright (`npm install --no-save playw
 - `app/publico`: bajas, enlaces de seguimiento y formulario firmado.
 - `app/tareas`: cola PostgreSQL, programación y trabajador.
 - `migraciones`: original SQL, seguridad OAuth y prompts/contadores de agentes.
-- `frontend`: aplicación adjunta con los dos cambios funcionales permitidos.
+- El frontend está en su propia carpeta (`Nexus-publicity-manager-main`); Docker lo compila desde `FRONTEND_DIR`.
 - `pruebas`, `scripts`, `sql`: verificación, instalación y originales.
-# Nexus-publicity-manager-bakend

@@ -2,8 +2,10 @@ import hashlib
 import hmac
 import time
 from collections import defaultdict, deque
+from html import escape
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,7 +14,7 @@ from psycopg.types.json import Jsonb
 
 from app.api import datos
 from app.config import config
-from app.db import actualizar, auditar, encolar, insertar, obtener, transaccion, uno
+from app.db import Conn, Row, actualizar, auditar, encolar, insertar, obtener, transaccion, uno
 from app.dominio.reglas import normalizar_nombre
 
 router = APIRouter()
@@ -37,30 +39,96 @@ def firma_baja() -> URLSafeSerializer:
     return URLSafeSerializer(config().sesion_secreto.get_secret_value(), salt="baja-v1")
 
 
+def pagina(titulo: str, cuerpo: str, status: int = 200) -> HTMLResponse:
+    """Página pública mínima, sin datos personales ni recursos externos."""
+    return HTMLResponse(
+        '<!doctype html><html lang="es-CO"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="robots" content="noindex">'
+        f"<title>{escape(titulo)}</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;"
+        "padding:0 1rem;color:#1d2b24;line-height:1.5}button{font:inherit;padding:.6rem 1.2rem;"
+        "border-radius:.5rem;border:1px solid #024029;background:#024029;color:#fff;cursor:pointer}"
+        "</style></head><body>"
+        f"<h1>{escape(titulo)}</h1>{cuerpo}</body></html>",
+        status_code=status,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def contacto_alternativo() -> str:
+    cuenta = config().gmail_cuenta_envio or config().admin_correo
+    return (
+        "<p>Si desea dejar de recibir nuestros correos, responda a cualquiera de ellos con la "
+        f'palabra <strong>BAJA</strong> o escriba a <a href="mailto:{escape(cuenta)}">'
+        f"{escape(cuenta)}</a>. Atenderemos su solicitud sin costo.</p>"
+    )
+
+
+def enlace_invalido() -> HTMLResponse:
+    return pagina(
+        "No pudimos procesar este enlace",
+        "<p>El enlace de baja no es válido o ya no corresponde a un mensaje registrado. "
+        "No se realizó ningún cambio.</p>" + contacto_alternativo(),
+        400,
+    )
+
+
+def mensaje_de_token(c: Conn, token: str) -> Row | None:
+    try:
+        ident = str(firma_baja().loads(token))
+        UUID(ident)
+    except (BadSignature, ValueError):
+        return None
+    return uno(c, "SELECT id,contacto_id FROM mensajes WHERE id=%s", (ident,), False) or None
+
+
 @router.get("/baja/{token}")
 def baja_get(token: str, request: Request) -> HTMLResponse:
     limitar(request)
-    return HTMLResponse(
-        '<!doctype html><html lang="es"><meta charset="utf-8"><title>Baja de comunicaciones</title><h1>Dejar de recibir correos</h1><form method="post"><button>Confirmar baja</button></form></html>'
+    with transaccion("proceso:bajas") as c:
+        m = mensaje_de_token(c, token)
+    if not m:
+        return enlace_invalido()
+    return pagina(
+        "Dejar de recibir correos",
+        "<p>Confirme que no desea recibir más correos de NEXUS Innovación.</p>"
+        '<form method="post"><button>Confirmar baja</button></form>',
     )
 
 
 @router.post("/baja/{token}")
 def baja_post(token: str, request: Request) -> HTMLResponse:
     limitar(request)
-    try:
-        ident = firma_baja().loads(token)
-        with transaccion("proceso:bajas", accion="baja") as c:
-            m = uno(c, "SELECT id,contacto_id FROM mensajes WHERE id=%s", (ident,), False)
-            if m:
-                c.execute(
-                    "INSERT INTO eventos_correo(tipo,mensaje_id,contacto_id,id_externo) VALUES('baja',%s,%s,%s) ON CONFLICT(id_externo) DO NOTHING",
-                    (m["id"], m["contacto_id"], "baja:" + str(m["id"])),
-                )
-    except (BadSignature, ValueError):
-        pass
-    return HTMLResponse(
-        '<!doctype html><html lang="es"><meta charset="utf-8"><title>Baja confirmada</title><h1>Solicitud procesada</h1><p>No recibirá nuevas comunicaciones asociadas a esta solicitud.</p></html>'
+    with transaccion("proceso:bajas", accion="baja") as c:
+        m = mensaje_de_token(c, token)
+        if not m:
+            return enlace_invalido()
+        nuevo = c.execute(
+            "INSERT INTO eventos_correo(tipo,mensaje_id,contacto_id,id_externo) VALUES('baja',%s,%s,%s) ON CONFLICT(id_externo) DO NOTHING RETURNING id",
+            (m["id"], m["contacto_id"], "baja:" + str(m["id"])),
+        ).fetchone()
+        # Confirmamos solo si la baja quedó registrada ahora o ya estaba aplicada.
+        aplicada = uno(
+            c,
+            """SELECT EXISTS (
+                SELECT 1 FROM contactos ct JOIN supresiones s
+                  ON s.correo=ct.correo OR s.dominio=split_part(ct.correo::text,'@',2)::citext
+                 WHERE ct.id=%s) OR EXISTS (
+                SELECT 1 FROM contactos WHERE id=%s AND (anonimizado_en IS NOT NULL OR excluido))
+                AS ok""",
+            (m["contacto_id"], m["contacto_id"]),
+        )["ok"]
+    if not aplicada:
+        return pagina(
+            "No pudimos confirmar la baja",
+            "<p>Registramos su solicitud, pero no fue posible confirmarla automáticamente.</p>"
+            + contacto_alternativo(),
+            409,
+        )
+    return pagina(
+        "Baja confirmada" if nuevo else "Su baja ya estaba registrada",
+        "<p>No recibirá nuevas comunicaciones de NEXUS Innovación en este correo.</p>",
     )
 
 
@@ -104,7 +172,7 @@ def clic(referencia: str, request: Request) -> RedirectResponse:
                 )
                 params["ref"] = referencia
                 target = urlunsplit((u.scheme, u.netloc, u.path, urlencode(params), u.fragment))
-    return RedirectResponse(target, status_code=302)
+    return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/webhooks/formulario")
@@ -139,6 +207,15 @@ def procesar_formulario(b: dict[str, Any]) -> None:
     autorizacion = b["autorizacion"]
     utm = b.get("utm") or {}
     with transaccion("proceso:webhook_formulario", accion="formulario", evento="formulario") as c:
+        # Desconectar «Formulario» detiene la recepción aunque el secreto siga configurado.
+        # FOR SHARE impide que una desconexión concurrente se cruce con este guardado.
+        estado = uno(
+            c, "SELECT estado FROM integraciones WHERE id='formulario' FOR SHARE", (), False
+        ).get("estado")
+        if estado != "conectada":
+            raise HTTPException(
+                503, "El receptor del formulario está desconectado; reintente más tarde"
+            )
         c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (b["id"],))
         if uno(c, "SELECT id FROM envios_formulario WHERE id_externo=%s", (b["id"],), False):
             return

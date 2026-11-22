@@ -46,6 +46,11 @@ def manejar(t: db.Row) -> None:
 
         enviar(data["mensajeId"])
         return
+    if tipo == "calcular_puntajes":
+        from app.dominio.calidad import calcular_lote
+
+        calcular_lote(str(t["id"]))
+        return
     actor = {
         "verificar_correo": "proceso:verificador",
         "sincronizar_gmail": "proceso:rastreador_gmail",
@@ -138,7 +143,9 @@ def procesar(t: db.Row) -> None:
             c.execute("SELECT terminar_tarea(%s,true)", (t["id"],))
     except Exception as exc:
         # Do not log provider payloads, addresses, credentials or email bodies.
-        log.warning("tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__, detalle=detalle_seguro(exc))
+        log.warning(
+            "tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__, detalle=detalle_seguro(exc)
+        )
         with transaccion("proceso:trabajador") as c:
             state = uno(
                 c,

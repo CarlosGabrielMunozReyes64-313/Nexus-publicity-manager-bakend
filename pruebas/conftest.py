@@ -1,13 +1,29 @@
 """Every pytest session uses a new PostgreSQL database; never clears user tables."""
 import os
+import secrets
 import subprocess
 import sys
 from uuid import uuid4
 
 import psycopg
+import pytest
+from cryptography.fernet import Fernet
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
-import pytest
+
+# Valores solo para pruebas: la suite no depende del .env local (que puede no existir
+# en una copia recién extraída). Una variable ya definida en el entorno conserva
+# prioridad; el .env queda en segundo plano para estas claves.
+for _clave, _valor in {
+    "APP_ENV": "development",
+    "APP_URL": "http://localhost:8000",
+    "AUTH_DEV_BYPASS": "true",
+    "ADMIN_CORREO": "admin@nexusinnovacion.com",
+    "CLAVE_CIFRADO": Fernet.generate_key().decode(),
+    "SESION_SECRETO": secrets.token_urlsafe(32),
+    "FORMULARIO_WEBHOOK_SECRETO": secrets.token_urlsafe(32),
+}.items():
+    os.environ.setdefault(_clave, _valor)
 
 
 @pytest.fixture(scope='session',autouse=True)

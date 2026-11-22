@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any
 from uuid import uuid4
 
@@ -7,6 +8,16 @@ from app.api import datos
 from app.api.campanas import nueva_propuesta
 from app.db import Conn, actualizar, encolar, insertar, obtener, todos, uno
 from app.dominio.reglas import BOGOTA
+
+CATEGORIAS_COSTO = (
+    "workspace",
+    "alojamiento",
+    "dominio",
+    "api_claude",
+    "verificador",
+    "busqueda",
+    "otro",
+)
 
 
 def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
@@ -19,6 +30,12 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
         if action == "enviar-respuesta" and method == "POST":
             if uno(c, "SELECT contacto_bloqueado(%s) AS bloqueado", (ct["id"],))["bloqueado"]:
                 raise HTTPException(400, "El contacto está suprimido")
+            # Sin Gmail la respuesta quedaría en cola sin salir y la conversación figuraría
+            # como atendida.
+            if obtener(c, "integraciones", "gmail")["estado"] != "conectada":
+                raise HTTPException(
+                    400, "Gmail está desconectado: conéctelo en Configuración para responder"
+                )
             text = str(body.get("texto", "")).strip()
             if len(text) < 3:
                 raise HTTPException(400, "El texto requiere al menos 3 caracteres")
@@ -93,13 +110,14 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
             "respuestaOrigenId": "respuesta_origen_id",
         }
         values = {col: body[k] for k, col in mapping.items() if k in body}
+        anterior = obtener(c, "oportunidades", ident, True) if ident else {}
         if values.get("respuesta_origen_id"):
             r = obtener(c, "respuestas", values["respuesta_origen_id"])
             values.update(contacto_id=r["contacto_id"], campana_origen_id=r["campana_id"])
-        if values.get("etapa") in ("cliente", "perdido"):
-            values["cerrada_en"] = datos.ahora()
-        elif "etapa" in values:
-            values["cerrada_en"] = None
+        if "etapa" in values and values["etapa"] != anterior.get("etapa"):
+            values["cerrada_en"] = (
+                datos.ahora() if values["etapa"] in ("cliente", "perdido") else None
+            )
         r = (
             actualizar(c, "oportunidades", ident, values)
             if ident
@@ -187,18 +205,33 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
         costo = body.get("costoUSD")
         if isinstance(costo, bool) or not isinstance(costo, (int, float)) or costo < 0:
             raise HTTPException(400, "El costo debe ser mayor o igual a cero")
+        hoy = datos.ahora().astimezone(BOGOTA).date()
+        texto = str(body.get("fecha") or "").strip()
+        try:
+            fecha = date.fromisoformat(texto) if texto else hoy
+        except ValueError as exc:
+            raise HTTPException(400, "La fecha del gasto debe tener formato AAAA-MM-DD") from exc
+        if fecha > hoy:
+            raise HTTPException(400, "La fecha del gasto no puede ser futura")
+        if fecha.year < 2000:
+            raise HTTPException(400, "Revise la fecha del gasto")
+        categoria = str(body.get("categoria") or "otro")
+        if categoria not in CATEGORIAS_COSTO:
+            raise HTTPException(400, "Categoría de costo no válida")
+        concepto = " ".join(str(body.get("concepto") or "").split())[:200] or "Registro manual"
         insertar(
             c,
             "costos",
             {
-                "fecha": datos.ahora().astimezone(BOGOTA).date(),
-                "categoria": "otro",
-                "concepto": "Registro manual",
+                "fecha": fecha,
+                "categoria": categoria,
+                "concepto": concepto,
                 "monto": costo,
                 "moneda": "USD",
                 "registrado_por": admin,
             },
         )
+        return {"ok": True, "fecha": fecha}
     elif (
         recurso == "informes"
         and ident == "recomendaciones"

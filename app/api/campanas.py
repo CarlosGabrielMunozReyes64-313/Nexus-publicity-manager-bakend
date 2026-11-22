@@ -6,9 +6,16 @@ from psycopg.types.json import Jsonb
 from app.api import datos, lecturas
 from app.config import config
 from app.db import Conn, Row, actualizar, encolar, insertar, obtener, todos, uno
-from app.dominio.reglas import reglas_validas, siguiente_ventana, validar_secuencia
+from app.dominio.reglas import (
+    VentanaIncompatible,
+    reglas_validas,
+    siguiente_ventana,
+    validar_secuencia,
+    ventanas_compatibles,
+)
 from app.esquemas.entradas import Secuencia
 from app.esquemas.serializar import serializar
+from app.motor.pausas import proximo_al_reanudar
 from app.motor.plantillas import render
 
 
@@ -161,7 +168,14 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
             errors.append("El segmento requiere aprobación")
         if errors:
             raise HTTPException(400, ". ".join(errors))
-        siguiente_ventana(datos.ahora(), s["ventanaEnvio"], limits["ventana"])
+        try:
+            siguiente_ventana(datos.ahora(), s["ventanaEnvio"], limits["ventana"])
+        except VentanaIncompatible as exc:
+            raise HTTPException(
+                400,
+                "La ventana de envío de la secuencia no coincide con el horario global "
+                "(Configuración → Límites y horarios)",
+            ) from exc
         congelado = {
             "secuencia": s,
             "reglas": seg["reglas"],
@@ -376,7 +390,7 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
             if cam["estado"] not in ("aprobada", "activa", "pausada"):
                 raise HTTPException(400, "La campaña requiere aprobación")
             seg = obtener(c, "segmentos", str(cam["segmento_id"]))
-            candidates = {r["id"] for r in lecturas.datos_segmento(c, seg["reglas"])}
+            candidates = set(lecturas.ids_segmento(c, seg["reglas"]))
             if not isinstance(body, list):
                 raise HTTPException(400, "Envíe una lista de contactos")
             for cid in body:
@@ -400,9 +414,18 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                 raise HTTPException(400, "La campaña requiere aprobación vigente")
             if obtener(c, "integraciones", "gmail")["estado"] != "conectada":
                 raise HTTPException(400, "Gmail está desconectado")
+            limits = uno(c, "SELECT valor FROM configuracion WHERE clave='limites'")["valor"]
+            congelada = a["contenido_congelado"]["secuencia"]
+            if not ventanas_compatibles(congelada["ventanaEnvio"], limits["ventana"]):
+                raise HTTPException(
+                    400,
+                    "La ventana de envío aprobada no coincide con el horario global "
+                    "(Configuración → Límites y horarios). Ajuste uno de los dos antes de reanudar.",
+                )
             actualizar(c, "campanas", ident, {"estado": "activa"})
             seg = obtener(c, "segmentos", str(cam["segmento_id"]))
-            ids = {r["id"] for r in lecturas.datos_segmento(c, seg["reglas"])}
+            ids = set(lecturas.ids_segmento(c, seg["reglas"]))
+            ahora = datos.ahora()
             for ins in todos(
                 c,
                 "SELECT * FROM inscripciones WHERE campana_id=%s AND motivo_salida IS NULL",
@@ -417,7 +440,12 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                         c,
                         "inscripciones",
                         str(ins["id"]),
-                        {"estado": "activa", "proximo_envio": datos.ahora()},
+                        {
+                            "estado": "activa",
+                            "proximo_envio": proximo_al_reanudar(
+                                c, ins, congelada, limits["ventana"], ahora
+                            ),
+                        },
                     )
         elif action in ("pausar", "detener"):
             stop = action == "detener"

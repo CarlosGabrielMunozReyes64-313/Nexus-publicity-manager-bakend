@@ -1,29 +1,23 @@
-# Validación ejecutada — 17 de noviembre de 2026
+# Validación ejecutada — 21 de noviembre de 2026
+
+Entorno: Python 3.12, PostgreSQL 16.15, Node 22.23.5, Chrome for Testing 153 con Playwright 1.65, sobre Linux.
 
 | Comprobación | Resultado | Alcance |
 | --- | --- | --- |
-| SQL original, PostgreSQL 16 | 37/37 casos | Reglas, disparadores, auditoría, anonimización y cola sobre migración 0001. |
-| pytest, PostgreSQL 16 real | 40 pruebas aprobadas | Base temporal creada con todas las migraciones; proveedores falsos. |
-| Contrato frontend/backend | 31 respuestas aprobadas por Zod | JSON obtenido de la API con datos de prueba; listas y fichas. |
-| Pruebas originales frontend | 39 pruebas aprobadas, 4 archivos | Vitest/MSW; VITE_API_URL absoluto solo para las pruebas Node. |
-| Ruff backend | Aprobado | app/. |
-| Mypy estricto | Aprobado, 40 archivos | app/. |
-| ESLint frontend | Aprobado | Configuración original. |
-| TypeScript + Vite | Compilación aprobada | VITE_USE_MOCKS=false; aplicación de mismo origen. |
-| Recorrido navegador | No ejecutado con éxito | Chromium bloqueado al arrancar; no se afirma validación visual. |
-| Docker Compose | No ejecutado | Configuración y Dockerfile entregados. |
-| Proveedores reales | No ejecutado | Sin credenciales reales ni envíos. |
+| SQL original, PostgreSQL 16 | 37/37 casos | `scripts/probar_esquema.py` sobre la migración 0001. |
+| pytest, PostgreSQL 16 real | 66 pruebas aprobadas | 48 existentes (algunas actualizadas al nuevo comportamiento) y 18 nuevas de regresión en `pruebas/test_correcciones.py`; cada prueba nueva pasa también aislada. Base temporal con todas las migraciones; proveedores falsos. |
+| Contrato frontend/backend | 33 respuestas aprobadas por Zod | JSON real guardado por pytest, incluidas `auditoria/pagina` y el embudo con fechas. |
+| Pruebas del frontend | 54 aprobadas, 7 archivos | Vitest + Testing Library; 15 nuevas, incluidas pruebas en modo API real. |
+| Ruff, formato y mypy estricto | Aprobados | `app/` (44 archivos). |
+| ESLint, Prettier y TypeScript + Vite | Aprobados | Compilación con `VITE_USE_MOCKS=false`. |
+| Recorrido de navegador (13 pantallas) | Aprobado | `scripts/prueba_navegador.py` con la API real, el frontend compilado y Chrome. |
+| Recorrido de las correcciones en navegador | Aprobado | Script temporal de Playwright contra la API real (no incluido): sesión caída frente a vencida, importación CSV con cambio de empresa y resumen, integraciones con la dirección real del webhook, costo con fecha, embudo por periodo, auditoría filtrada y exportada, baja inválida. |
+| Arranque desde los ZIP | Aprobado | `scripts/probar_arranque.py` con los ZIP entregados: extracción limpia (sin `.env` previo), detección del frontend, `docker compose config`, pytest (66), `npm ci`, `npm test` (54), compilación, migraciones, API y aplicación. |
+| Docker | Parcial | Rutas y contextos verificados con `docker compose config` y una construcción BuildKit de las mismas instrucciones COPY. La descarga de imágenes base de Docker Hub estaba bloqueada en este entorno, por lo que no se construyó la imagen completa. |
+| Proveedores reales | No ejecutado | Sin credenciales reales ni envíos (Google, Gmail, Claude, Gemini, Hunter). |
 
-## Escenarios comprobados
-
-Sesiones y hash, cierre de sesión, CSRF, OAuth inválido, rechazo de bypass en producción; CRUD, importación atómica, aprobación de base legal y supresión; edición que invalida aprobación, nueva aprobación y rechazo de evidencia inferida; respuestas de API con campos opcionales sin null indebido; privilegios que impiden alterar auditoría; reinicio de demo que conserva auditoría.
-
-El escenario de correo usa 50 contactos ficticios elegibles, reloj controlado y Gmail falso: programa 50 mensajes, pausa y reanuda reutilizando identidad; simula aceptación de Gmail antes de guardar confirmación y recuperación concurrente sin segundo envío; verifica separación de los envíos reales aun con trabajador retrasado; registra una respuesta, un rebote duro y una baja; programa 47 seguimientos. Total: 97 llamadas al proveedor falso. GET de baja no suprime; POST repetido es idempotente.
-
-Se probaron además firma e idempotencia del formulario, validación de salida de agentes y presupuesto, bloqueo de destinos privados del lector, normalización de citas, reglas de segmentos, festivos, clasificación de verificación de correo, importación analítica repetida sin duplicación y programación periódica idempotente.
-
-Las pruebas no prueban entrega real de correo, exactitud comercial de un modelo ni cumplimiento exhaustivo del enunciado. Existe un aviso de deprecación del complemento AnyIO/pytest en el entorno; no produjo fallos.
+Las pruebas no prueban entrega real de correo ni la exactitud comercial de un modelo. Antes de producción, conecte las integraciones con cuentas de prueba y ejecute `npm run verificar:despliegue` del frontend contra cada entorno.
 
 ## Evidencia reproducible
 
-`pruebas/salidas/backend_tests.log`, `frontend_tests.log`, `esquema_tests.log`, `contratos.json` y `contrato_zod.log`. Los datos son ficticios. Las instrucciones de ejecución están en README.md; los límites conocidos están en DECISIONES.md.
+`pruebas/salidas/contratos.json` (generado por pytest). Las instrucciones de ejecución están en README.md; los límites conocidos en DECISIONES.md.

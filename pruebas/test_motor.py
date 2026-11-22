@@ -24,6 +24,9 @@ from test_datos import auth
 
 def test_mvp_50_contactos(auth,monkeypatch):
     reloj=RelojFalso(datetime.fromisoformat('2026-11-17T09:00:00-05:00'))
+    # Las rutas de la API usan datos.ahora(); en la prueba deben compartir el reloj falso.
+    import app.api.datos as datos_mod
+    monkeypatch.setattr(datos_mod,'ahora',lambda:reloj.ahora())
     gmail=GmailFalso()
     ids=[]
     with transaccion('admin') as c:
@@ -108,6 +111,8 @@ def test_mvp_50_contactos(auth,monkeypatch):
 
 
 def test_webhook_y_baja(auth):
+    with transaccion() as c:
+        c.execute("UPDATE integraciones SET estado='conectada' WHERE id='formulario'")
     b={'id':uuid4().hex,'formulario':'diagnostico','nombre':'Persona ficticia','correo':'persona@'+uuid4().hex+'.example','empresa':'Empresa formulario','municipio':'Cali','enviadoEn':'2026-11-17T09:00:00-05:00','autorizacion':{'aceptada':True,'texto':'Autorización ficticia','versionPolitica':'v1'},'respuestas':{}}
     raw=json.dumps(b).encode()
     fecha=str(int(time.time()))
@@ -121,5 +126,8 @@ def test_webhook_y_baja(auth):
         ct=uno(c,'SELECT * FROM contactos WHERE correo=%s',(b['correo'],))
         legal=uno(c,'SELECT * FROM bases_legales WHERE contacto_id=%s AND vigente',(ct['id'],))
         assert legal['aprobada_en'] is None and ct['etapa']=='lead'
-    assert auth.get('/baja/token-no-valido').status_code==200
-    assert auth.post('/baja/token-no-valido').status_code==200
+    # Un enlace inválido nunca muestra una confirmación de baja.
+    r=auth.get('/baja/token-no-valido')
+    assert r.status_code==400 and 'No recibirá nuevas comunicaciones' not in r.text
+    r=auth.post('/baja/token-no-valido')
+    assert r.status_code==400 and 'No se realizó ningún cambio' in r.text

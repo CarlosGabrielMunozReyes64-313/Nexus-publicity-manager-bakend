@@ -18,7 +18,9 @@ def test_empresa_contacto_legal_supresion(auth):
     assert auth.post('/api/empresas',json=b).status_code==200
     assert auth.post('/api/empresas',json=b).status_code==409
     e=next(r for r in auth.get('/api/empresas').json() if r.get('dominio')==dominio)
-    assert e['estadoCuenta']=='prospecto' and e['evidencias']
+    # El listado es liviano; las evidencias completas viven en la ficha de detalle.
+    assert e['estadoCuenta']=='prospecto' and e['evidencias']==[]
+    assert auth.get('/api/empresas/'+e['id']).json()['evidencias']
     body={'id':'nuevo','empresaId':e['id'],'nombre':'Ana','correo':' ANA@'+dominio.upper()+' ','estadoCorreo':'valido','baseLegal':{'tipo':'corporativo_generico','texto':'Publicado','prueba':'https://'+dominio,'aprobadaPorAdmin':True}}
     assert auth.post('/api/contactos',json=body).status_code==200
     cs=auth.get('/api/contactos').json()

@@ -1,9 +1,24 @@
+# Arranque local completo: PostgreSQL 16, migraciones y la aplicación (API + trabajador).
+#
+# Estructura esperada (la misma que dejan los dos ZIP al extraerlos en una carpeta):
+#   carpeta-de-trabajo/
+#     Nexus-publicity-manager-bakend-main/   ← ejecute «docker compose» aquí
+#     Nexus-publicity-manager-main/          ← frontend
+# Si el frontend está en otra ruta o con otro nombre, defina FRONTEND_DIR en .env
+# (scripts/entorno_desarrollo.py lo detecta y lo escribe automáticamente).
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+  additional_contexts:
+    frontend: ${FRONTEND_DIR:-../Nexus-publicity-manager-main}
+
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_USER: nexus_owner
-      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?Configure DB_OWNER_PASSWORD}
+      POSTGRES_PASSWORD: ${DB_OWNER_PASSWORD:?Configure DB_OWNER_PASSWORD en .env (python scripts/entorno_desarrollo.py)}
       POSTGRES_DB: nexus
     volumes:
       - postgres:/var/lib/postgresql/data
@@ -12,9 +27,8 @@ services:
       interval: 3s
       retries: 20
   migrate:
-    build:
-      context: ..
-      dockerfile: nexus-publicity-manager-backend/Dockerfile
+    build: *build
+    image: nexus-publicity-manager:local
     env_file: .env
     environment:
       DATABASE_URL: postgresql://nexus_owner:${DB_OWNER_PASSWORD}@db:5432/nexus
@@ -23,12 +37,13 @@ services:
       db:
         condition: service_healthy
   app:
-    build:
-      context: ..
-      dockerfile: nexus-publicity-manager-backend/Dockerfile
+    build: *build
+    image: nexus-publicity-manager:local
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://nexus_app:${DB_APP_PASSWORD}@db:5432/nexus
+      DATABASE_URL: postgresql://nexus_app:${DB_APP_PASSWORD:?Configure DB_APP_PASSWORD en .env}@db:5432/nexus
+      # En el contenedor el frontend ya viene compilado en /srv/nexus/frontend/dist.
+      FRONTEND_DIST: ""
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       migrate:

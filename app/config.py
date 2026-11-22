@@ -43,6 +43,8 @@ class Config(BaseSettings):
     diagnostico_url: str = "https://nexusinnovacion.com/diagnostico"
     tasa_cop_por_usd: float = 4000
     umbral_calificado: int = 70
+    # Carpeta con el frontend compilado (index.html). Vacía: frontend/dist dentro del backend.
+    frontend_dist: str = ""
 
     @model_validator(mode="after")
     def validar(self) -> Self:

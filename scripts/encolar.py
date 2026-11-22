@@ -4,7 +4,7 @@ import json
 from app import db
 from app.config import config
 parser=argparse.ArgumentParser()
-parser.add_argument('tipo',choices=['proponer_segmentos','proponer_campana','enriquecer_empresa','buscar_duplicados','calcular_puntaje','informe_semanal'])
+parser.add_argument('tipo',choices=['proponer_segmentos','proponer_campana','enriquecer_empresa','buscar_duplicados','calcular_puntaje','calcular_puntajes','informe_semanal'])
 parser.add_argument('--datos',default='{}',help='Objeto JSON, por ejemplo {"segmentoId":"UUID"}')
 args=parser.parse_args()
 db.abrir(config().database_url.get_secret_value())

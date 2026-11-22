@@ -64,7 +64,14 @@ def numero(v: str) -> float:
 def coincide(
     c: dict[str, Any], empresas: list[dict[str, Any]], reglas: list[dict[str, str]]
 ) -> bool:
-    e = next((e for e in empresas if e["id"] == c["empresaId"]), {})
+    return coincide_indexado(c, {str(e["id"]): e for e in empresas}, reglas)
+
+
+def coincide_indexado(
+    c: dict[str, Any], empresas: dict[str, dict[str, Any]], reglas: list[dict[str, str]]
+) -> bool:
+    """Misma lógica que coincide() de src/lib/reglas.ts, con empresas indexadas por id."""
+    e = empresas.get(str(c["empresaId"]), {})
     campos = {
         **{k: e.get(k, "") for k in ("municipio", "sector", "tamano")},
         "puntaje": str(e.get("puntaje", {}).get("total", 0)),
@@ -112,13 +119,25 @@ def validar_secuencia(s: dict[str, Any], prohibidas: list[str]) -> list[str]:
     return errors
 
 
+class VentanaIncompatible(HTTPException):
+    """La ventana de una secuencia y el horario global no tienen días u horas en común."""
+
+    def __init__(self, detalle: str = "Las ventanas de envío no se cruzan") -> None:
+        super().__init__(400, detalle)
+
+
+def ventanas_compatibles(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    dias = set(a["dias"]) & set(b["dias"])
+    return bool(dias) and max(a["desde"], b["desde"]) < min(a["hasta"], b["hasta"])
+
+
 def siguiente_ventana(
     ahora: datetime, a: dict[str, Any], b: dict[str, Any], espera: int = 0
 ) -> datetime:
     dias = set(a["dias"]) & set(b["dias"])
     desde, hasta = max(a["desde"], b["desde"]), min(a["hasta"], b["hasta"])
-    if not dias or desde >= hasta:
-        raise HTTPException(400, "Las ventanas de envío no se cruzan")
+    if not ventanas_compatibles(a, b):
+        raise VentanaIncompatible()
     dt = ahora.astimezone(BOGOTA)
     festivos = holidays.country_holidays("CO", years=range(dt.year, dt.year + 3))
     while espera:
@@ -134,4 +153,4 @@ def siguiente_ventana(
             if hora < hasta:
                 return dt
         dt = (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    raise HTTPException(400, "No hay una ventana disponible")
+    raise VentanaIncompatible("No hay una ventana disponible")

@@ -19,6 +19,30 @@ structlog.configure(
 log = structlog.get_logger()
 
 
+def activar_formulario_inicial(c: db.Conn) -> None:
+    """Compatibilidad con instalaciones previas.
+
+    Antes el receptor aceptaba envíos firmados aunque la integración figurara como
+    desconectada. Ahora el estado manda; para no cortar la captación de una instalación
+    que nunca tocó esa integración, se conecta una sola vez si hay secreto configurado.
+    Una desconexión explícita del administrador siempre se respeta.
+    """
+    if not config().formulario_webhook_secreto.get_secret_value():
+        return
+    tocada = db.uno(
+        c,
+        """SELECT 1 AS si FROM registro_auditoria WHERE entidad='integraciones'
+        AND entidad_id='formulario' AND accion<>'insert' LIMIT 1""",
+        (),
+        False,
+    )
+    if not tocada:
+        c.execute(
+            "UPDATE integraciones SET estado='conectada',detalle=%s WHERE id='formulario' AND estado<>'conectada'",
+            ("Conectado: el receptor acepta envíos firmados del sitio",),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = config()
@@ -28,8 +52,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "INSERT INTO administradores(correo,nombre) VALUES(%s,'Administrador NEXUS') ON CONFLICT(correo) DO NOTHING",
             (cfg.admin_correo,),
         )
+    with db.transaccion("sistema", accion="activar_formulario_inicial") as c:
+        activar_formulario_inicial(c)
     yield
     db.cerrar()
+
+
+def carpeta_frontend() -> Path:
+    raiz = Path(__file__).resolve().parents[1]
+    configurada = config().frontend_dist.strip()
+    if not configurada:
+        return (raiz / "frontend/dist").resolve()
+    ruta = Path(configurada).expanduser()
+    return (ruta if ruta.is_absolute() else raiz / ruta).resolve()
 
 
 def crear_app() -> FastAPI:
@@ -139,14 +174,19 @@ def crear_app() -> FastAPI:
     def spa(ruta: str) -> FileResponse:
         if ruta.startswith(("api/", "r/", "baja/")):
             raise HTTPException(404, "Ruta no encontrada")
-        root = (Path(__file__).resolve().parents[1] / "frontend/dist").resolve()
+        root = carpeta_frontend()
         target = (root / ruta).resolve()
         if not target.is_relative_to(root):
             raise HTTPException(404, "Ruta no encontrada")
         if target.is_file():
             return FileResponse(target)
         if (root / "index.html").exists():
-            return FileResponse(root / "index.html")
-        raise HTTPException(503, "Compile el frontend antes de iniciar la aplicación")
+            # index.html no se guarda en caché para que cada despliegue cargue sus assets nuevos.
+            return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})
+        raise HTTPException(
+            503,
+            "No se encontró el frontend compilado. Ejecute «npm run build» en la carpeta del "
+            "frontend y defina FRONTEND_DIST con la ruta a su carpeta dist.",
+        )
 
     return app
