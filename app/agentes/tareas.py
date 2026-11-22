@@ -246,7 +246,12 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                 c,
                 "busquedas_descubrimiento",
                 str(busqueda["id"]),
-                {"estado": "terminada", "progreso": 100, "terminada_en": datos.ahora()},
+                {
+                    "estado": "terminada",
+                    "progreso": 100,
+                    "terminada_en": datos.ahora(),
+                    "error": None,
+                },
             )
         elif tipo == "clasificar_respuesta":
             current = obtener(c, "respuestas", str(respuesta["id"]), True)

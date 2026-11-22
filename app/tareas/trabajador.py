@@ -8,9 +8,11 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from app import db
+from app.agentes.errores import FalloProveedor
 from app.api.datos import ahora
 from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
+from app.dominio.reglas import BOGOTA
 from app.integraciones.conexiones import pausar_todo
 from app.tareas.programador import programar
 
@@ -98,9 +100,31 @@ def timeout(signum: int, frame: Any) -> None:
     raise TimeoutError("La tarea excedió el tiempo permitido")
 
 
+# Errores de agentes que no se arreglan reintentando: la tarea falla de inmediato y el
+# administrador ve el motivo en lugar de esperar varios minutos de reintentos inútiles.
+DEFINITIVOS = {
+    "Configure los precios del proveedor para el modelo seleccionado",
+    "Entrada excede el presupuesto por tarea",
+    "Tope por tarea alcanzado; requiere revisión",
+    "Tope mensual de agentes alcanzado",
+    "La ejecución requiere revisión por costo",
+    "Configure GEMINI_API_KEY en el backend y el trabajador",
+    "GEMINI_MODELO no válido",
+}
+
+
+def sin_reintento(exc: Exception) -> bool:
+    if isinstance(exc, FalloProveedor):
+        return not exc.reintentable
+    return isinstance(exc, ValueError) and str(exc) in DEFINITIVOS
+
+
 def detalle_seguro(exc: Exception) -> str:
     import re
 
+    if isinstance(exc, FalloProveedor):
+        # Siempre se arma con textos fijos del backend (sin claves ni contenido externo).
+        return str(exc)
     permitidos = {
         "Configure los precios del proveedor para el modelo seleccionado",
         "Entrada excede el presupuesto por tarea",
@@ -146,11 +170,19 @@ def procesar(t: db.Row) -> None:
         log.warning(
             "tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__, detalle=detalle_seguro(exc)
         )
+        motivo = detalle_seguro(exc)
         with transaccion("proceso:trabajador") as c:
+            if t["tipo"] in AGENTES and sin_reintento(exc):
+                c.execute("UPDATE tareas SET max_intentos=intentos WHERE id=%s", (t["id"],))
             state = uno(
                 c,
                 "SELECT terminar_tarea(%s,false,%s) AS estado",
-                (t["id"], "La tarea no pudo completarse; revise integración y datos"),
+                (
+                    t["id"],
+                    motivo
+                    if motivo != "Error no clasificado; requiere diagnóstico adicional"
+                    else "La tarea no pudo completarse; revise integración y datos",
+                ),
             )["estado"]
             auth_error = (
                 isinstance(exc, RefreshError)
@@ -181,9 +213,28 @@ def procesar(t: db.Row) -> None:
                         t["datos"]["busquedaId"],
                         {
                             "estado": "error",
-                            "error": "No se pudo completar la búsqueda; revise proveedor, presupuesto y fuentes",
+                            "error": f"No se pudo completar la búsqueda. {motivo}.",
                         },
                     )
+            elif state == "reprogramada" and t["tipo"] == "descubrir_empresas":
+                # La búsqueda vuelve a la cola y el administrador ve por qué y cuándo
+                # será el próximo intento (sigue actualizándose en pantalla).
+                cola = uno(
+                    c,
+                    "SELECT intentos,max_intentos,ejecutar_desde FROM tareas WHERE id=%s",
+                    (t["id"],),
+                )
+                hora = cola["ejecutar_desde"].astimezone(BOGOTA).strftime("%H:%M")
+                actualizar(
+                    c,
+                    "busquedas_descubrimiento",
+                    t["datos"]["busquedaId"],
+                    {
+                        "estado": "en_cola",
+                        "error": f"Intento {cola['intentos']} de {cola['max_intentos']} sin "
+                        f"éxito: {motivo}. Nuevo intento a las {hora} (hora de Colombia).",
+                    },
+                )
     finally:
         signal.alarm(0)
 

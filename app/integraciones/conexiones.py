@@ -73,16 +73,9 @@ def probar_proveedor_ia() -> tuple[str, str]:
             raise ValueError("Configure GEMINI_API_KEY en el servidor")
         if not re.fullmatch(r"[a-zA-Z0-9._-]+", cfg.gemini_modelo):
             raise ValueError("GEMINI_MODELO no válido")
-        httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.gemini_modelo}:generateContent",
-            headers={"x-goog-api-key": secret},
-            json={
-                "contents": [{"role": "user", "parts": [{"text": "Responde OK."}]}],
-                "generationConfig": {"maxOutputTokens": 8},
-            },
-            timeout=30,
-        ).raise_for_status()
-        return secret, "Conexión comprobada con Gemini (proveedor activo de agentes)"
+        from app.agentes.gemini import probar_conexion
+
+        return secret, probar_conexion(secret, cfg.gemini_modelo)
     from anthropic import Anthropic
 
     secret = cfg.anthropic_api_key.get_secret_value()

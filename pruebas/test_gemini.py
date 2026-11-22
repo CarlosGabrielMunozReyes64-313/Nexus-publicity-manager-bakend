@@ -76,10 +76,182 @@ def test_gemini_rechaza_sin_fuentes_y_errores(client, monkeypatch, mode):
         )
 
     with pytest.raises(ValueError) as exc:
-        GeminiReal(httpx.MockTransport(handler)).ejecutar(
+        GeminiReal(httpx.MockTransport(handler), dormir=lambda s: None).ejecutar(
             "gemini-3.5-flash-lite", "", "", Descubrimiento, 8192
         )
     assert "secreto-no-filtrar" not in str(exc.value)
+
+
+def error_google(status, *, cuota=None, valor="15", espera=None, razon=None):
+    detalles = []
+    if cuota:
+        detalles.append(
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                    {
+                        "quotaMetric": "generativelanguage.googleapis.com/generate_content_requests",
+                        "quotaId": cuota,
+                        "quotaValue": valor,
+                    }
+                ],
+            }
+        )
+    if espera:
+        detalles.append({"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": espera})
+    if razon:
+        detalles.append({"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": razon})
+    return httpx.Response(
+        status,
+        json={"error": {"code": status, "message": "secreto-no-filtrar", "details": detalles}},
+    )
+
+
+def respuesta_ok(texto='{"empresas":[]}', fuentes=True):
+    candidate = {"finishReason": "STOP", "content": {"parts": [{"text": texto}]}}
+    if fuentes:
+        candidate["groundingMetadata"] = {
+            "groundingChunks": [{"web": {"uri": "https://empresa.co"}}],
+            "webSearchQueries": ["empresas Colombia"],
+        }
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [candidate],
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 20},
+        },
+    )
+
+
+def test_gemini_limite_por_minuto_espera_y_continua(client, monkeypatch):
+    monkeypatch.setattr(config(), "gemini_api_key", SecretStr("prueba"))
+    respuestas = [
+        error_google(429, cuota="GenerateRequestsPerMinutePerProjectPerModel", espera="7s"),
+        respuesta_ok(),
+        respuesta_ok(),
+    ]
+    pausas = []
+    result, usage = GeminiReal(
+        httpx.MockTransport(lambda req: respuestas.pop(0)), dormir=pausas.append
+    ).ejecutar("gemini-3.5-flash-lite", "", "Colombia", Descubrimiento, 8192)
+    assert result.empresas == [] and pausas == [7.0] and not respuestas
+    assert usage["gemini_search_queries"] == 1
+
+
+@pytest.mark.parametrize(
+    "respuesta,mensaje",
+    [
+        (
+            error_google(429, cuota="GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+            "cuota diaria del plan gratuito",
+        ),
+        (
+            error_google(
+                429, cuota="GenerateRequestsPerMinutePerProjectPerModel-FreeTier", valor="0"
+            ),
+            "no incluye cuota",
+        ),
+        (
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": 429,
+                        "message": "You exceeded your current quota, please check your plan and "
+                        "billing details.",
+                        "status": "RESOURCE_EXHAUSTED",
+                    }
+                },
+            ),
+            "no está disponible en el plan gratuito",
+        ),
+        (error_google(400, razon="API_KEY_INVALID"), "GEMINI_API_KEY no es válida"),
+        (error_google(404), "GEMINI_MODELO no existe"),
+    ],
+)
+def test_gemini_errores_definitivos_no_reintentan(client, monkeypatch, respuesta, mensaje):
+    from app.agentes.errores import FalloProveedor
+
+    monkeypatch.setattr(config(), "gemini_api_key", SecretStr("secreto-no-filtrar"))
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req)
+        return respuesta
+
+    with pytest.raises(FalloProveedor) as exc:
+        GeminiReal(httpx.MockTransport(handler), dormir=lambda s: None).ejecutar(
+            "gemini-3.5-flash-lite", "", "", Descubrimiento, 8192
+        )
+    assert mensaje in str(exc.value) and "secreto-no-filtrar" not in str(exc.value)
+    assert not exc.value.reintentable and exc.value.costo_conocido and len(llamadas) == 1
+
+
+def test_busqueda_reintenta_tras_429_sin_chocar_con_el_tope(auth, monkeypatch):
+    """Un 429 no consume la reserva: el reintento funciona y la pantalla explica la espera."""
+    from app.agentes.errores import FalloProveedor
+    from app.agentes.gemini import CUOTA_DIARIA_GRATIS, LIMITE_MINUTO
+    from app.tareas.trabajador import procesar
+
+    cfg = config()
+    monkeypatch.setattr(cfg, "agente_proveedor", "gemini")
+    monkeypatch.setattr(cfg, "gemini_api_key", SecretStr("prueba"))
+    salidas: list = []
+
+    class Proveedor:
+        def ejecutar(self, modelo, prompt, entrada, schema, max_tokens):
+            salida = salidas.pop(0)
+            if isinstance(salida, Exception):
+                raise salida
+            return schema.model_validate(salida), {"input_tokens": 1000, "output_tokens": 100}
+
+    monkeypatch.setattr("app.agentes.gemini.GeminiReal", Proveedor)
+
+    def nueva():
+        with transaccion() as c:
+            b = insertar(c, "busquedas_descubrimiento", {"consulta": "Empresas de Palmira"})
+            clave = str(uuid4())
+            encolar(c, "descubrir_empresas", {"busquedaId": str(b["id"])}, clave)
+            return str(b["id"]), str(
+                uno(c, "SELECT id FROM tareas WHERE clave_unica=%s", (clave,))["id"]
+            )
+
+    def intentar(tarea):
+        with transaccion() as c:
+            t = uno(
+                c,
+                "UPDATE tareas SET estado='en_proceso',tomada_por='prueba',tomada_en=now(),"
+                "intentos=intentos+1 WHERE id=%s RETURNING *",
+                (tarea,),
+            )
+        procesar(t)
+        with transaccion() as c:
+            return uno(c, "SELECT * FROM tareas WHERE id=%s", (tarea,))
+
+    busqueda, tarea = nueva()
+    salidas.append(FalloProveedor(LIMITE_MINUTO, {}, reintentable=True))
+    assert intentar(tarea)["estado"] == "pendiente"
+    with transaccion() as c:
+        run = uno(c, "SELECT * FROM ejecuciones_agente WHERE tarea_id=%s", (tarea,))
+        assert run["estado"] == "error" and float(run["costo_usd"]) == 0
+        b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
+        assert b["estado"] == "en_cola" and b["error"].startswith("Intento 1 de ")
+        assert "límite de solicitudes por minuto" in b["error"] and "Nuevo intento" in b["error"]
+    # Antes este reintento fallaba con «Tope por tarea alcanzado» por la reserva retenida.
+    salidas.append({"empresas": []})
+    assert intentar(tarea)["estado"] == "completada"
+    with transaccion() as c:
+        b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
+        assert b["estado"] == "terminada" and b["error"] is None
+
+    # Una cuota diaria agotada no se arregla en 1 o 5 minutos: falla ya, con el motivo.
+    busqueda, tarea = nueva()
+    salidas.append(FalloProveedor(CUOTA_DIARIA_GRATIS, {}, reintentable=False))
+    t = intentar(tarea)
+    assert t["estado"] == "fallida" and t["intentos"] == 1
+    with transaccion() as c:
+        b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
+        assert b["estado"] == "error" and "cuota diaria del plan gratuito" in b["error"]
 
 
 def test_programacion_opcional_idempotente_y_nacional(auth, monkeypatch):
@@ -217,3 +389,23 @@ def test_fuentes_consulta_cada_pagina_una_vez(monkeypatch):
     )
     assert len(calls) == 1
     assert all(r["estado"] == "verificado" for r in result)
+
+
+def test_prueba_de_conexion_avisa_si_falta_la_busqueda(client):
+    from app.agentes.gemini import probar_conexion
+
+    def handler(req):
+        if "tools" in json.loads(req.content):
+            return httpx.Response(
+                429,
+                json={"error": {"code": 429, "message": "check your plan and billing details"}},
+            )
+        return respuesta_ok(fuentes=False)
+
+    detalle = probar_conexion("prueba", "gemini-3.5-flash-lite", httpx.MockTransport(handler))
+    assert detalle.startswith("Gemini responde, pero la prueba de búsqueda en Google")
+    assert "plan gratuito" in detalle
+    ok = probar_conexion("prueba", "m", httpx.MockTransport(lambda req: respuesta_ok()))
+    assert ok.startswith("Conexión comprobada con Gemini, incluida la búsqueda")
+    with pytest.raises(ValueError, match="no existe"):
+        probar_conexion("prueba", "m", httpx.MockTransport(lambda req: error_google(404)))

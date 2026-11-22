@@ -47,7 +47,7 @@ Conserva las variables que ya tienes. Añade estas en **Variables** del backend:
 
 La clave va solamente en Railway; no en Vercel, GitHub ni una variable `VITE_`. Obtenerla: https://aistudio.google.com/apikey
 
-El proyecto de Google necesita acceso a Gemini y a Google Search grounding; verifica cuota y facturación. Tener una clave no garantiza que esa función esté habilitada.
+El proyecto de Google necesita acceso a Gemini y a Google Search grounding; verifica cuota y facturación. Tener una clave no garantiza que esa función esté habilitada. **En los modelos Gemini 3 y posteriores (como `gemini-3.5-flash-lite`), la búsqueda en Google no está disponible en el plan gratuito de la API**: sin facturación activa, cada búsqueda responde 429 aunque la clave funcione para lo demás. Con facturación, Google indica 5.000 búsquedas gratis al mes compartidas entre modelos Gemini 3 y luego USD 14 por 1.000 (revise los precios vigentes). En Configuración → Integraciones, «Conectar» la API de IA prueba también esa búsqueda y lo indica.
 
 Se incluyen precios configurables de referencia (consultados el 19 de noviembre de 2026): entrada USD 0.30 y salida USD 2.50 por millón de tokens; búsqueda USD 0.014 por consulta. No se descuenta ningún cupo gratuito en la estimación conservadora. Si Google cambia tarifas o cambias modelo, actualiza `GEMINI_PRECIOS_JSON` y `GEMINI_COSTO_BUSQUEDA_USD`.
 
@@ -58,7 +58,7 @@ TOPE_USD_POR_TAREA=0.50
 TOPE_MENSUAL_USD=30
 ```
 
-Estos topes son controles internos estimados, no un tope de facturación garantizado por Google. Se reserva por adelantado un margen de 20 consultas por ejecución de descubrimiento, y se concilia con el número de consultas reportadas y los tokens, incluido pensamiento. Una llamada puede superar la reserva; si excede el tope se detiene la aplicación del resultado y queda para revisión. Los fallos conservan la reserva para evitar reintentos ilimitados. Configura también controles de gasto/cuota en Google.
+Estos topes son controles internos estimados, no un tope de facturación garantizado por Google. Se reserva por adelantado un margen de 20 consultas por ejecución de descubrimiento, y se concilia con el número de consultas reportadas y los tokens, incluido pensamiento. Una llamada puede superar la reserva; si excede el tope se detiene la aplicación del resultado y queda para revisión. Si Gemini responde con un error (429, 5xx o salida no válida), se registra solo el consumo real y se libera la reserva, para que el reintento no choque con el tope por tarea; si no hay respuesta (red o tiempo agotado), la reserva se conserva hasta conciliar. Un límite por minuto se reintenta solo (primero dentro de la misma tarea y luego en la cola); una cuota diaria agotada o un plan sin búsqueda fallan de inmediato con el motivo visible en la búsqueda. Configura también controles de gasto/cuota en Google.
 
 ## 3. Activar el trabajador
 

@@ -3,10 +3,12 @@ import time
 from contextvars import ContextVar
 from typing import Any, Protocol, TypeVar
 
+import anthropic
 from anthropic import Anthropic
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
+from app.agentes.errores import FalloProveedor
 from app.api.datos import ahora
 from app.config import config
 from app.db import actualizar, auditar, insertar, transaccion, uno
@@ -22,9 +24,39 @@ class Claude(Protocol):
     ) -> tuple[T, dict[str, Any]]: ...
 
 
+# Estados HTTP de Anthropic en los que un intento posterior puede funcionar.
+CLAUDE_TRANSITORIOS = {408, 409, 429, 500, 502, 503, 504, 529}
+
+
 class ClaudeReal:
     def ejecutar(
         self, modelo: str, prompt: str, entrada: str, schema: type[T], max_tokens: int
+    ) -> tuple[T, dict[str, Any]]:
+        parcial: dict[str, Any] = {}
+        try:
+            return self._ejecutar(modelo, prompt, entrada, schema, max_tokens, parcial)
+        except anthropic.APIStatusError as exc:
+            status = exc.status_code
+            raise FalloProveedor(
+                f"Claude no disponible ({status}); revise clave, cuota y modelo",
+                parcial,
+                reintentable=status in CLAUDE_TRANSITORIOS,
+            ) from None
+        except anthropic.APIConnectionError:
+            raise FalloProveedor(
+                "Claude no disponible (red); revise clave, cuota y modelo",
+                parcial,
+                costo_conocido=False,
+            ) from None
+
+    def _ejecutar(
+        self,
+        modelo: str,
+        prompt: str,
+        entrada: str,
+        schema: type[T],
+        max_tokens: int,
+        parcial: dict[str, Any],
     ) -> tuple[T, dict[str, Any]]:
         client = Anthropic(
             api_key=config().anthropic_api_key.get_secret_value(), timeout=90, max_retries=1
@@ -60,6 +92,7 @@ class ClaudeReal:
                 ],
             )
             search_usage = found.usage.model_dump()
+            parcial.update(search_usage)
             external = json.dumps([b.model_dump() for b in found.content], ensure_ascii=False)
             entrada = "<datos_no_confiables>" + external[:50000] + "</datos_no_confiables>"
             max_tokens = max(64, max_tokens // 2)
@@ -70,9 +103,12 @@ class ClaudeReal:
             messages=[{"role": "user", "content": entrada}],
             output_format=schema,
         )
-        if response.parsed_output is None:
-            raise ValueError("El modelo no devolvió una salida válida")
         usage = response.usage.model_dump()
+        if response.parsed_output is None:
+            for key, value in usage.items():
+                if isinstance(value, int):
+                    parcial[key] = (parcial.get(key) or 0) + value
+            raise FalloProveedor("El modelo no devolvió una salida válida", parcial)
         for key in (
             "input_tokens",
             "output_tokens",
@@ -267,10 +303,55 @@ def ejecutar(
         if actual > cfg.tope_usd_por_tarea:
             raise ValueError("La ejecución requiere revisión por costo")
         return parsed
-    except Exception:
+    except Exception as exc:
+        parcial: float | None = None
+        if isinstance(exc, FalloProveedor) and exc.costo_conocido:
+            try:
+                parcial = costo(exc.uso, precios)
+            except ValueError:
+                parcial = None
         with transaccion("agente:" + agente) as c:
             r = uno(c, "SELECT estado FROM ejecuciones_agente WHERE id=%s", (run["id"],))
-            if r["estado"] == "en_curso":
+            if (
+                r["estado"] == "en_curso"
+                and parcial is not None
+                and isinstance(exc, FalloProveedor)
+            ):
+                # El proveedor respondió (error o salida no válida): se conoce el consumo
+                # real, así que se libera la reserva y el reintento no choca con el tope
+                # por tarea por un dinero que nunca se gastó.
+                actualizar(
+                    c,
+                    "ejecuciones_agente",
+                    str(run["id"]),
+                    {
+                        "estado": "error",
+                        "error": str(exc)[:500],
+                        "costo_usd": parcial,
+                        "tokens_entrada": exc.uso.get("input_tokens", 0),
+                        "tokens_salida": exc.uso.get("output_tokens", 0),
+                        "busquedas_web": (exc.uso.get("server_tool_use") or {}).get(
+                            "web_search_requests", 0
+                        )
+                        + exc.uso.get("gemini_search_queries", 0),
+                        "duracion_ms": int((time.monotonic() - started) * 1000),
+                        "terminada_en": ahora(),
+                    },
+                )
+                if parcial > 0:
+                    insertar(
+                        c,
+                        "costos",
+                        {
+                            "fecha": ahora().astimezone(BOGOTA).date(),
+                            "categoria": "otro" if gemini else "api_claude",
+                            "concepto": ("Gemini: " if gemini else "Claude: ") + agente,
+                            "monto": parcial,
+                            "moneda": "USD",
+                            "ejecucion_agente_id": run["id"],
+                        },
+                    )
+            elif r["estado"] == "en_curso":
                 actualizar(
                     c,
                     "ejecuciones_agente",
