@@ -76,17 +76,54 @@ def probar_proveedor_ia() -> tuple[str, str]:
         from app.agentes.gemini import probar_conexion
 
         return secret, probar_conexion(secret, cfg.gemini_modelo)
-    from anthropic import Anthropic
-
     secret = cfg.anthropic_api_key.get_secret_value()
     if not secret:
         raise ValueError("Configure ANTHROPIC_API_KEY en el servidor")
-    Anthropic(api_key=secret).messages.create(
-        model=cfg.claude_modelo_ligero,
-        max_tokens=8,
-        messages=[{"role": "user", "content": "Responde OK."}],
-    )
-    return secret, "Conexión comprobada con Claude (proveedor activo de agentes)"
+    return secret, probar_claude(secret)
+
+
+def probar_claude(secret: str, cliente: Any = None) -> str:
+    """Clave y modelo ligero; aparte, la búsqueda web que usa Descubrimiento."""
+    import anthropic
+
+    from app.agentes.ejecutor import clasificar_claude, revisar_busqueda_claude
+    from app.agentes.errores import FalloProveedor
+
+    cfg = config()
+    client = cliente or anthropic.Anthropic(api_key=secret, timeout=60, max_retries=1)
+    try:
+        client.messages.create(
+            model=cfg.claude_modelo_ligero,
+            max_tokens=8,
+            messages=[{"role": "user", "content": "Responde OK."}],
+        )
+    except anthropic.APIStatusError as exc:
+        raise ValueError(clasificar_claude(exc)[0]) from None
+    except anthropic.APIConnectionError:
+        raise ValueError("Claude no disponible (red); revise clave, cuota y modelo") from None
+    try:
+        found = client.messages.create(
+            model=cfg.claude_modelo_mayor,
+            max_tokens=256,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Busca en la web la fecha de hoy en Bogotá y responde solo la fecha.",
+                }
+            ],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
+        )
+        revisar_busqueda_claude([b.model_dump() for b in found.content], {})
+    except anthropic.APIStatusError as exc:
+        return (
+            "Claude responde, pero la prueba de búsqueda web (Descubrimiento) falló: "
+            + clasificar_claude(exc)[0]
+        )
+    except anthropic.APIConnectionError:
+        return "Claude responde, pero la prueba de búsqueda web no obtuvo respuesta (red)"
+    except FalloProveedor as exc:
+        return f"Claude responde, pero la prueba de búsqueda web (Descubrimiento) falló: {exc}"
+    return "Conexión comprobada con Claude, incluida la búsqueda web que usa Descubrimiento"
 
 
 def cambiar(c: Conn, ident: str, accion: str) -> dict[str, str]:

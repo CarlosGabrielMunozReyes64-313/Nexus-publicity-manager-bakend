@@ -409,3 +409,102 @@ def test_prueba_de_conexion_avisa_si_falta_la_busqueda(client):
     assert ok.startswith("Conexión comprobada con Gemini, incluida la búsqueda")
     with pytest.raises(ValueError, match="no existe"):
         probar_conexion("prueba", "m", httpx.MockTransport(lambda req: error_google(404)))
+
+
+def error_anthropic(status, mensaje):
+    import anthropic
+
+    response = httpx.Response(
+        status, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    body = {"type": "error", "error": {"type": "invalid_request_error", "message": mensaje}}
+    return anthropic.APIStatusError(mensaje, response=response, body=body)
+
+
+@pytest.mark.parametrize(
+    "status,mensaje,esperado,reintentable",
+    [
+        (
+            400,
+            "Your credit balance is too low to access the Anthropic API.",
+            "no tiene créditos",
+            False,
+        ),
+        (
+            400,
+            "Web search is not enabled for this organization",
+            "búsqueda web no está habilitada",
+            False,
+        ),
+        (401, "invalid x-api-key", "ANTHROPIC_API_KEY no es válida", False),
+        (404, "model: claude-x", "no existe", False),
+        (429, "rate_limit_error", "límite de solicitudes", True),
+        (529, "Overloaded", "saturado", True),
+    ],
+)
+def test_claude_errores_claros(status, mensaje, esperado, reintentable):
+    from app.agentes.ejecutor import clasificar_claude
+
+    texto, reintentar = clasificar_claude(error_anthropic(status, mensaje))
+    assert esperado in texto and reintentar is reintentable
+    assert mensaje not in texto
+
+
+def test_claude_busqueda_web_fallida_no_termina_en_cero_resultados():
+    from app.agentes.ejecutor import revisar_busqueda_claude
+    from app.agentes.errores import FalloProveedor
+
+    ok = [
+        {
+            "type": "web_search_tool_result",
+            "content": [{"type": "web_search_result", "url": "https://x.co"}],
+        }
+    ]
+    assert revisar_busqueda_claude(ok, {}) is True
+    error = [
+        {
+            "type": "web_search_tool_result",
+            "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+        }
+    ]
+    with pytest.raises(FalloProveedor, match=r"búsqueda web \(unavailable\)"):
+        revisar_busqueda_claude(error, {"input_tokens": 10})
+    with pytest.raises(FalloProveedor, match="no realizó búsquedas"):
+        revisar_busqueda_claude([{"type": "text", "text": "hola"}], {})
+
+
+def test_prueba_de_conexion_claude_incluye_busqueda(client):
+    from types import SimpleNamespace
+
+    from app.integraciones.conexiones import probar_claude
+
+    def bloque(datos):
+        return SimpleNamespace(model_dump=lambda: datos)
+
+    class Mensajes:
+        def __init__(self, busqueda):
+            self.busqueda = busqueda
+
+        def create(self, **kwargs):
+            if "tools" not in kwargs:
+                return SimpleNamespace(content=[bloque({"type": "text", "text": "OK"})])
+            if isinstance(self.busqueda, Exception):
+                raise self.busqueda
+            return SimpleNamespace(content=[bloque(b) for b in self.busqueda])
+
+    def cliente(busqueda):
+        return SimpleNamespace(messages=Mensajes(busqueda))
+
+    resultado = [{"type": "web_search_tool_result", "content": [{"type": "web_search_result"}]}]
+    assert probar_claude("k", cliente(resultado)).startswith(
+        "Conexión comprobada con Claude, incluida"
+    )
+    detalle = probar_claude("k", cliente(error_anthropic(400, "web search is disabled")))
+    assert "búsqueda web no está habilitada" in detalle
+
+    class SinCreditos:
+        def create(self, **kwargs):
+            raise error_anthropic(400, "Your credit balance is too low")
+
+    with pytest.raises(ValueError, match="no tiene créditos"):
+        probar_claude("k", SimpleNamespace(messages=SinCreditos()))

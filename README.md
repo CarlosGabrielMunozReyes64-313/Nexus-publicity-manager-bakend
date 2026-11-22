@@ -112,6 +112,18 @@ Estructura de precios, reemplazando los valores por cifras actuales:
 {"identificador-del-modelo":{"entrada":1.0,"salida":2.0,"cache_lectura":0.1,"cache_escritura":1.25}}
 ```
 
+Ejemplo con los precios publicados por Anthropic el 22 de noviembre de 2026 (USD por millón de tokens; compruébelos antes de usarlos). Para Haiku 5.5 son los de prompts de hasta 100.000 tokens, el caso de estos agentes:
+
+```env
+AGENTE_PROVEEDOR=claude
+ANTHROPIC_API_KEY=sk-ant-...
+CLAUDE_MODELO_LIGERO=claude-haiku-5-5
+CLAUDE_MODELO_MAYOR=claude-sonnet-5-5
+CLAUDE_PRECIOS_JSON={"claude-sonnet-5-5":{"entrada":2,"salida":10,"cache_lectura":0.10,"cache_escritura":2.50},"claude-haiku-5-5":{"entrada":0.10,"salida":0.50,"cache_lectura":0.01,"cache_escritura":0.125}}
+```
+
+La API de Claude se paga en la Claude Console (platform.claude.com), aparte de cualquier suscripción de claude.ai: compre créditos o, con un plan Max o Team, vincule sus créditos mensuales de API. La búsqueda web (USD 10 por 1.000 búsquedas, `COSTO_BUSQUEDA_WEB_USD=0.01`) debe estar habilitada para la organización en la Console. En Configuración → Integraciones, «Conectar» la API de Claude prueba la clave y también una búsqueda web, e indica el motivo si algo falta (créditos, búsqueda deshabilitada, modelo).
+
 Los números anteriores solo ilustran la estructura, no son precios vigentes. Sin precios configurados no se ejecutan agentes. El gasto incluye tokens y búsquedas; se reserva presupuesto antes de llamar, se guarda el uso informado y se detiene la aplicación de resultados que excedan el tope. Las reservas de llamadas fallidas se conservan para revisión conservadora.
 
 Las búsquedas parten de la pantalla Descubrimiento. Las tareas que no tienen botón en el frontend original se encolan por CLI:

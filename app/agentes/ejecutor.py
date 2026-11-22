@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from contextvars import ContextVar
 from typing import Any, Protocol, TypeVar
@@ -27,6 +28,74 @@ class Claude(Protocol):
 # Estados HTTP de Anthropic en los que un intento posterior puede funcionar.
 CLAUDE_TRANSITORIOS = {408, 409, 429, 500, 502, 503, 504, 529}
 
+CLAUDE_SIN_CREDITOS = (
+    "Claude: la organización de la Claude Console no tiene créditos (400). Compre créditos "
+    "en platform.claude.com o vincule los créditos mensuales de su plan"
+)
+CLAUDE_LIMITE_GASTO = "Claude: se alcanzó el límite de gasto configurado en la Claude Console"
+CLAUDE_SIN_BUSQUEDA = (
+    "Claude: la búsqueda web no está habilitada para la organización; actívela en la "
+    "configuración de la Claude Console"
+)
+CLAUDE_CLAVE = "Claude: la clave ANTHROPIC_API_KEY no es válida (401)"
+CLAUDE_PERMISO = "Claude: la clave no tiene permiso para este modelo o función (403)"
+CLAUDE_MODELO = (
+    "Claude: el modelo de CLAUDE_MODELO_MAYOR o CLAUDE_MODELO_LIGERO no existe o no está "
+    "disponible (404)"
+)
+CLAUDE_LIMITE = "Claude: se superó el límite de solicitudes de la organización (429)"
+CLAUDE_SATURADO = "Claude está saturado o no disponible temporalmente ({status})"
+CLAUDE_RECHAZO = "Claude rechazó la solicitud ({status}); revise modelo y configuración"
+
+
+def clasificar_claude(exc: anthropic.APIStatusError) -> tuple[str, bool]:
+    """(mensaje fijo, reintentable). El texto de Anthropic solo se usa para clasificar."""
+    status = exc.status_code
+    texto = f"{exc.message} {exc.body}".lower()
+    if "credit balance" in texto:
+        return CLAUDE_SIN_CREDITOS, False
+    if "spend limit" in texto or "usage limit" in texto:
+        return CLAUDE_LIMITE_GASTO, False
+    if "web search" in texto or "web_search" in texto:
+        return CLAUDE_SIN_BUSQUEDA, False
+    if status == 401:
+        return CLAUDE_CLAVE, False
+    if status == 403:
+        return CLAUDE_PERMISO, False
+    if status == 404:
+        return CLAUDE_MODELO, False
+    if status == 429:
+        return CLAUDE_LIMITE, True
+    if status in CLAUDE_TRANSITORIOS:
+        return CLAUDE_SATURADO.format(status=status), True
+    return CLAUDE_RECHAZO.format(status=status), False
+
+
+def revisar_busqueda_claude(bloques: list[dict[str, Any]], uso: dict[str, Any]) -> bool:
+    """Falla con un motivo claro si la búsqueda web no aportó resultados.
+
+    La API responde 200 aunque la búsqueda falle: el error viaja dentro del contenido.
+    Devuelve True si hubo al menos una búsqueda con resultados.
+    """
+    errores: list[str] = []
+    exitos = 0
+    for b in bloques:
+        if b.get("type") != "web_search_tool_result":
+            continue
+        contenido = b.get("content")
+        if isinstance(contenido, dict) and contenido.get("type") == "web_search_tool_result_error":
+            errores.append(str(contenido.get("error_code", "")))
+        else:
+            exitos += 1
+    if exitos:
+        return True
+    if "too_many_requests" in errores:
+        raise FalloProveedor("Claude: la búsqueda web superó su límite de solicitudes", uso)
+    if errores:
+        codigo = re.sub(r"[^a-z_]", "", errores[0])[:40] or "desconocido"
+        raise FalloProveedor(f"Claude no pudo completar la búsqueda web ({codigo})", uso)
+    raise FalloProveedor("Claude no realizó búsquedas web; no se guardaron empresas", uso)
+
 
 class ClaudeReal:
     def ejecutar(
@@ -36,12 +105,8 @@ class ClaudeReal:
         try:
             return self._ejecutar(modelo, prompt, entrada, schema, max_tokens, parcial)
         except anthropic.APIStatusError as exc:
-            status = exc.status_code
-            raise FalloProveedor(
-                f"Claude no disponible ({status}); revise clave, cuota y modelo",
-                parcial,
-                reintentable=status in CLAUDE_TRANSITORIOS,
-            ) from None
+            mensaje, reintentable = clasificar_claude(exc)
+            raise FalloProveedor(mensaje, parcial, reintentable=reintentable) from None
         except anthropic.APIConnectionError:
             raise FalloProveedor(
                 "Claude no disponible (red); revise clave, cuota y modelo",
@@ -93,7 +158,9 @@ class ClaudeReal:
             )
             search_usage = found.usage.model_dump()
             parcial.update(search_usage)
-            external = json.dumps([b.model_dump() for b in found.content], ensure_ascii=False)
+            bloques = [b.model_dump() for b in found.content]
+            revisar_busqueda_claude(bloques, parcial)
+            external = json.dumps(bloques, ensure_ascii=False)
             entrada = "<datos_no_confiables>" + external[:50000] + "</datos_no_confiables>"
             max_tokens = max(64, max_tokens // 2)
         response = client.messages.parse(
