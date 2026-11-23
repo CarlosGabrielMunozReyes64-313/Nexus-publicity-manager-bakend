@@ -75,7 +75,11 @@ Para desarrollar el frontend con Vite contra este backend, defina `APP_URL=http:
 
 ### Railway + Vercel
 
-`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **añade la migración `0005`**, que es **obligatoria** antes de arrancar el código nuevo:
+`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`).
+
+**Migración `0006` (23 de noviembre de 2026), obligatoria:** añade la clave `cumplimiento` a `configuracion` (amplía su CHECK) con `{"aprobacionLegalAutomatica": false}`. Sin ella, la pantalla Configuración → Cumplimiento falla. La aplica `alembic upgrade head` en el *Pre-deploy command*. Se puede bajar con `alembic downgrade 0005`.
+
+La versión anterior **añadió la migración `0005`**, que es **obligatoria** antes de arrancar el código nuevo:
 
 - añade a `pasos` las columnas `formato` y `cuerpo_html` (con sus CHECK);
 - añade `secuencias.archivada_en` y `mensajes.cuerpo_html`;
@@ -250,6 +254,6 @@ Para el recorrido de navegador, instale Playwright (`npm install --no-save playw
 - `app/integraciones`: Gmail, Hunter, GA4 y Search Console; adaptadores falsos para pruebas.
 - `app/publico`: bajas, enlaces de seguimiento y formulario firmado.
 - `app/tareas`: cola PostgreSQL, programación y trabajador.
-- `migraciones`: original SQL, seguridad OAuth, prompts/contadores de agentes (0004) el prompt v2 del Estratega-redactor para rutas de correo y (0005) el editor de secuencias: formato HTML, archivo, una secuencia por campaña, propuesta interna por campaña y prompt v3.
+- `migraciones`: original SQL, seguridad OAuth, prompts/contadores de agentes (0004) el prompt v2 del Estratega-redactor para rutas de correo (0005) el editor de secuencias: formato HTML, archivo, una secuencia por campaña, propuesta interna por campaña y prompt v3, y (0006) la política de aprobación automática de la base legal.
 - El frontend está en su propia carpeta (`Nexus-publicity-manager-main`); Docker lo compila desde `FRONTEND_DIR`.
 - `pruebas`, `scripts`, `sql`: verificación, instalación y originales.

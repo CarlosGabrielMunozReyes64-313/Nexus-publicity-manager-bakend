@@ -96,7 +96,8 @@ def verificar(c: Conn, ident: str, proveedor: Verificador | None = None) -> None
         "verificaciones_correo",
         {"contacto_id": ident, "correo": correo, "resultado": estado, "proveedor": "dns_mx+hunter"},
     )
-    if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ident,))["motivo"] is None:
-        from app.api.datos import avanzar
+    from app.api.datos import aprobar_automatica, avanzar
 
+    aprobar_automatica(c, ident)
+    if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ident,))["motivo"] is None:
         avanzar(c, ident, "contactable", "contactable")

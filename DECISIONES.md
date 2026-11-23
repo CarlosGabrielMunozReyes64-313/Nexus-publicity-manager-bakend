@@ -153,3 +153,13 @@ Reemplaza la pantalla de Propuestas para las rutas de correo. Todo vive en «Sec
 - **`POST /contactos/:id/verificar-correo`.** Encola `verificar_correo` para ese contacto y responde `{ok:true}`. Responde 400 si el contacto no tiene correo y 409 si está excluido o anonimizado. Queda en la auditoría como `verificar_correo`. El estado nunca se marca a mano.
 - **Al conectar el verificador.** Se encolan todos los correos en estado `desconocido` de contactos no excluidos ni anonimizados, y el detalle de la integración dice cuántos.
 - **Mensaje.** «El segmento no tiene contactos elegibles» ahora dice también que hace falta un correo verificado, no solo la base legal. El trabajador usa la misma constante para tratarlo como fallo definitivo.
+
+## Aprobación automática de la base legal (23 de noviembre de 2026)
+
+- **Pedido.** El administrador pidió que la evidencia legal se llene y se apruebe sola, conservando los botones manuales para cambiarla.
+- **Política, apagada por defecto.** Migración 0006: clave `cumplimiento` en `configuracion` con `{"aprobacionLegalAutomatica": false}`. El CHECK de claves se amplía en una migración reversible; no se debilita ningún CHECK ni disparador. `PUT /configuracion/cumplimiento` exige un booleano y queda en la auditoría (`aprobacion_automatica_encendida` / `_apagada`).
+- **Qué se aprueba.** Solo contactos con correo, no excluidos ni anonimizados, sin base aprobada y que no sean de formulario. Si el administrador ya registró tipo, texto y prueba, se aprueba tal cual. Si no, hace falta una evidencia verificada con página (`url`) cuyo valor sea ese mismo correo (`correo` del contacto o `correoCorporativo` de la empresa). Con ella se registra `corporativo_generico`, un texto que dice que la aprobó la política sin revisión manual, y la prueba «url — «cita» — fecha». Sin esa evidencia, el contacto sigue esperando al administrador.
+- **Quién aprueba.** `aprobada_por` es el administrador que encendió la política (lo exige el CHECK de `bases_legales`). Cada aprobación queda en la auditoría como `aprobacion_legal_automatica`.
+- **Cuándo.** Al encender la política (sobre los pendientes; la respuesta dice cuántos) y cada vez que el verificador revisa un correo, antes de calcular la elegibilidad. Apagarla no deshace lo aprobado.
+- **Límites que se mantienen.** La elegibilidad sigue exigiendo correo `valido`, y las bajas y supresiones prevalecen. La IA no interviene: es una regla del backend, sin datos de contacto enviados a ningún modelo.
+- **Aviso.** Que la base legal sea suficiente depende del caso (Ley 1581 de 2012: el correo corporativo de un empleado se considera dato personal). La política es una decisión del administrador.

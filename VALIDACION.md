@@ -1,5 +1,7 @@
 # Validación ejecutada — 22 de noviembre de 2026
 
+**Actualización del 23 de noviembre de 2026 (aprobación automática de la base legal, migración 0006):** pytest 125 aprobadas sobre PostgreSQL 16. `pruebas/test_aprobacion_legal.py` comprueba que la política viene apagada y no aprueba nada, que rechaza un valor no booleano, que al encenderla aprueba los contactos con correo publicado y cita verificada (con tipo, texto, prueba, aprobador, etapa y auditoría), que deja pendiente el contacto sin página, que aprueba tal cual lo que registró el administrador, que verificar un correo nuevo lo aprueba, y que apagada vuelve a esperar al administrador. También comprueba que 0006 baja a 0005 (sin la clave y con el CHECK anterior) y vuelve a subir. Contrato: 69 respuestas reales aprobadas por Zod, incluida `configuracion/cumplimiento`. Ruff y mypy estricto sin errores.
+
 Entorno: Python 3.12, PostgreSQL 16, Node 22.23.5, Chrome for Testing 153 con Playwright, sobre Linux.
 
 | Comprobación | Resultado | Alcance |

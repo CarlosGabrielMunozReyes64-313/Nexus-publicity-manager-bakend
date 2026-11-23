@@ -34,7 +34,12 @@ def leer(ruta: str, request: Request) -> Any:
             result = leer_secuencias(c, parts, params)
         elif ruta == "panel/resumen":
             result = uno(c, "SELECT * FROM v_resumen_panel")
-        elif recurso == "configuracion" and ident in ("marca", "limites", "cliente-ideal"):
+        elif recurso == "configuracion" and ident in (
+            "marca",
+            "limites",
+            "cliente-ideal",
+            "cumplimiento",
+        ):
             result = uno(
                 c, "SELECT valor FROM configuracion WHERE clave=%s", (ident.replace("-", "_"),)
             )["valor"]
@@ -289,6 +294,8 @@ def mutacion(
         datos.descartar_duplicado(c, ident, admin)
     elif ruta == "supresiones" and method == "POST":
         datos.suprimir(c, body)
+    elif recurso == "configuracion" and method == "PUT" and ident == "cumplimiento":
+        return datos.guardar_cumplimiento(c, body, admin)
     elif (
         recurso == "configuracion"
         and method == "PUT"

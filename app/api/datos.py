@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.api.lecturas import contacto, empresa
 from app.db import Conn, Row, actualizar, auditar, encolar, insertar, obtener, todos, uno
-from app.dominio.reglas import ETAPAS, dominio, telefono
+from app.dominio.reglas import BOGOTA, ETAPAS, dominio, telefono
 from app.esquemas.entradas import Contacto, Empresa
 from app.esquemas.serializar import serializar
 
@@ -184,6 +184,116 @@ def aprobar_legal(c: Conn, ident: str, admin: str) -> None:
     actualizar(c, "bases_legales", str(b["id"]), {"aprobada_por": admin, "aprobada_en": ahora()})
     if uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (ident,))["motivo"] is None:
         avanzar(c, ident, "contactable", "contactable")
+
+
+# ---------------------------------------------------------------- aprobación automática
+
+TEXTO_AUTOMATICO = (
+    "Correo de contacto publicado por {empresa} en su sitio web ({url}). Base aprobada "
+    "automáticamente por la política de cumplimiento, sin revisión manual."
+)
+
+
+def politica_automatica(c: Conn) -> str | None:
+    """Administrador que encendió la aprobación automática, o None si está apagada."""
+    r = uno(
+        c, "SELECT valor, actualizado_por FROM configuracion WHERE clave='cumplimiento'", (), False
+    )
+    if not r or not r["valor"].get("aprobacionLegalAutomatica") or not r["actualizado_por"]:
+        return None
+    return str(r["actualizado_por"])
+
+
+def fuente_publicada(c: Conn, ct: Row) -> Row | None:
+    """La evidencia verificada (con página y cita comprobada) del correo del contacto."""
+    return uno(
+        c,
+        """SELECT url, cita, obtenido_en FROM evidencias
+           WHERE url IS NOT NULL AND estado='verificado' AND lower(valor)=lower(%s)
+             AND (contacto_id=%s OR (empresa_id=%s AND campo IN ('correoCorporativo','correo')))
+           ORDER BY obtenido_en DESC LIMIT 1""",
+        (ct["correo"], ct["id"], ct["empresa_id"]),
+        False,
+    )
+
+
+def aprobar_automatica(c: Conn, ident: str) -> bool:
+    """Si la política está encendida, llena la evidencia y aprueba la base legal del contacto.
+
+    Solo con una prueba real: el correo debe aparecer en una página con cita verificada. No
+    toca bases ya aprobadas, autorizaciones de formulario (las revisa el administrador) ni
+    contactos excluidos o anonimizados. Si el administrador ya registró tipo, texto y prueba,
+    se aprueba lo suyo tal cual.
+    """
+    admin = politica_automatica(c)
+    if not admin:
+        return False
+    ct = obtener(c, "contactos", ident, True)
+    if not ct["correo"] or ct["excluido"] or ct["anonimizado_en"]:
+        return False
+    b = uno(
+        c,
+        "SELECT * FROM bases_legales WHERE contacto_id=%s AND vigente FOR UPDATE",
+        (ident,),
+        False,
+    )
+    if b and (b["aprobada_en"] or b["tipo"] == "autorizacion_formulario"):
+        return False
+    completa = (
+        b
+        and b["tipo"] != "pendiente"
+        and (b["texto"] or "").strip()
+        and (b["prueba"] or "").strip()
+    )
+    if not completa:
+        f = fuente_publicada(c, ct)
+        if not f:
+            return False
+        empresa = obtener(c, "empresas", str(ct["empresa_id"]))["razon_social"]
+        fecha = f["obtenido_en"].astimezone(BOGOTA).date().isoformat()
+        cita = " ".join((f["cita"] or "").split())[:200]
+        legal(
+            c,
+            ident,
+            {
+                "tipo": "corporativo_generico",
+                "texto": TEXTO_AUTOMATICO.format(empresa=empresa, url=f["url"]),
+                "prueba": f"{f['url']} — «{cita}» — obtenido el {fecha}",
+            },
+        )
+    aprobar_legal(c, ident, admin)
+    auditar(c, "aprobacion_legal_automatica", "contactos", ident)
+    return True
+
+
+def aplicar_politica(c: Conn) -> int:
+    """Aplica la aprobación automática a todos los contactos que la tienen pendiente."""
+    filas = todos(
+        c,
+        """SELECT ct.id FROM contactos ct
+           WHERE ct.correo IS NOT NULL AND NOT ct.excluido AND ct.anonimizado_en IS NULL
+             AND NOT EXISTS (SELECT 1 FROM bases_legales b
+                             WHERE b.contacto_id=ct.id AND b.vigente AND b.aprobada_en IS NOT NULL)""",
+    )
+    return sum(aprobar_automatica(c, str(f["id"])) for f in filas)
+
+
+def guardar_cumplimiento(c: Conn, body: Any, admin: str) -> dict[str, Any]:
+    """PUT /configuracion/cumplimiento: encender o apagar la aprobación automática."""
+    valor = body.get("aprobacionLegalAutomatica") if isinstance(body, dict) else None
+    if not isinstance(valor, bool):
+        raise HTTPException(400, "Indique si la aprobación automática queda encendida (sí o no)")
+    c.execute(
+        "UPDATE configuracion SET valor=%s, actualizado_por=%s WHERE clave='cumplimiento'",
+        (Jsonb({"aprobacionLegalAutomatica": valor}), admin),
+    )
+    auditar(
+        c,
+        "aprobacion_automatica_" + ("encendida" if valor else "apagada"),
+        "configuracion",
+        "cumplimiento",
+    )
+    return {"ok": True, "aprobadas": aplicar_politica(c) if valor else 0}
 
 
 def suprimir(c: Conn, body: Row, origen: str = "manual") -> None:
