@@ -11,7 +11,7 @@ Entorno: Python 3.12, PostgreSQL 16, Node 22.23.5, Chrome for Testing 153 con Pl
 | Compatibilidad con el frontend anterior | Aprobada | Los esquemas Zod del frontend entregado antes aceptan las 42 respuestas de este backend que ese frontend usa; las otras 26 son de rutas nuevas. Por eso el backend se puede desplegar primero. |
 | Recorrido de 9 pasos en Chrome con la API real | Aprobado | Base nueva migrada a head, API real y trabajador real. Solo la IA y Gmail son simulados (script temporal, no incluido). Detalle de los pasos bajo la tabla. |
 | Recorrido de navegador (13 pantallas) | Aprobado | `scripts/prueba_navegador.py` con la API real; ahora comprueba también que `/propuestas` lleva a `/secuencias`. |
-| Pruebas del frontend | 94 aprobadas, 10 archivos | Ver VALIDACION del frontend. |
+| Pruebas del frontend | 95 aprobadas, 10 archivos | Ver VALIDACION del frontend. |
 | Ruff, formato y mypy estricto | Aprobados | `app/` (50 archivos) y las pruebas nuevas. |
 | Arranque desde los ZIP | Aprobado | `scripts/probar_arranque.py` con los ZIP entregados: extracción limpia, `docker compose config`, pytest (122), `npm ci`, `npm test`, compilación, migraciones, API y aplicación. |
 | Docker | Parcial | `docker compose config` sí; las imágenes base de Docker Hub no se pueden descargar en este entorno. |
