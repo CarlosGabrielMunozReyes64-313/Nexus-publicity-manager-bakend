@@ -1,15 +1,26 @@
 import signal
 import time
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import HTTPException
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
+from psycopg.types.json import Jsonb
 
 from app import db
+from app.agentes.ejecutor import CLAUDE_LIMITE, CLAUDE_SATURADO, CLAUDE_TRANSITORIOS
 from app.agentes.errores import FalloProveedor
+from app.agentes.gemini import (
+    CAPACIDAD,
+    CUOTA_DIARIA,
+    CUOTA_DIARIA_GRATIS,
+    LIMITE_MINUTO,
+    SATURADO,
+)
 from app.api.datos import ahora
 from app.api.rutas_correo import SIN_ELEGIBLES
 from app.config import config
@@ -29,6 +40,60 @@ AGENTES = {
     "informe_semanal",
 }
 log = structlog.get_logger()
+
+# Saturación o límite por minuto del proveedor de IA: no depende de la tarea y suele pasar
+# sola. La cola espera más (10 intentos en unas 6 horas) en lugar de rendirse a los 36
+# minutos. Los demás errores conservan sus 4 intentos.
+ESPERAS_SATURACION_MIN = (1, 5, 15, 30, 60, 60, 60, 60, 60)
+INTENTOS_SATURACION = len(ESPERAS_SATURACION_MIN) + 1
+INTENTOS_NORMALES = 4
+SATURACION = (
+    {SATURADO.format(status=s) for s in (500, 502, 503, 504)}
+    | {CLAUDE_SATURADO.format(status=s) for s in CLAUDE_TRANSITORIOS}
+    | {LIMITE_MINUTO, CAPACIDAD, CLAUDE_LIMITE}
+)
+# Cuota diaria de Gemini agotada: reintentar en minutos no sirve. La tarea espera al
+# reinicio de la cuota (medianoche del Pacífico, según Google) sin gastar intentos, hasta
+# ESPERAS_CUOTA_MAX días seguidos.
+CUOTAS_DIARIAS = {CUOTA_DIARIA, CUOTA_DIARIA_GRATIS}
+ESPERAS_CUOTA_MAX = 7
+PACIFICO = ZoneInfo("America/Los_Angeles")
+MESES = (
+    "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre"
+).split()
+
+
+def tras_reinicio_de_cuota(momento: datetime) -> datetime:
+    """Cinco minutos después de la próxima medianoche del Pacífico."""
+    dia = momento.astimezone(PACIFICO).date() + timedelta(days=1)
+    return datetime(dia.year, dia.month, dia.day, 0, 5, tzinfo=PACIFICO)
+
+
+def esperar_cuota(c: db.Conn, t: db.Row, motivo: str) -> bool:
+    """Reprograma la tarea al reinicio de la cuota diaria. False si ya esperó demasiado."""
+    esperas = int((t["datos"] or {}).get("_esperasCuota", 0))
+    if esperas >= ESPERAS_CUOTA_MAX:
+        return False
+    reanuda = tras_reinicio_de_cuota(ahora())
+    c.execute(
+        "UPDATE tareas SET estado='pendiente',ejecutar_desde=%s,tomada_por=NULL,tomada_en=NULL,"
+        "intentos=greatest(0,intentos-1),ultimo_error=%s,datos=datos||%s WHERE id=%s",
+        (reanuda, motivo, Jsonb({"_esperasCuota": esperas + 1}), t["id"]),
+    )
+    if t["tipo"] == "descubrir_empresas":
+        local = reanuda.astimezone(BOGOTA)
+        actualizar(
+            c,
+            "busquedas_descubrimiento",
+            t["datos"]["busquedaId"],
+            {
+                "estado": "en_cola",
+                "error": f"{motivo}. La búsqueda seguirá sola el {local.day} de "
+                f"{MESES[local.month - 1]} a las {local:%H:%M} (hora de Colombia), cuando "
+                "Google reinicie la cuota.",
+            },
+        )
+    return True
 
 
 def manejar(t: db.Row) -> None:
@@ -205,6 +270,21 @@ def procesar(t: db.Row) -> None:
         )
         motivo = detalle_seguro(exc)
         with transaccion("proceso:trabajador") as c:
+            if t["tipo"] in AGENTES and motivo in CUOTAS_DIARIAS and esperar_cuota(c, t, motivo):
+                return
+            saturado = t["tipo"] in AGENTES and motivo in SATURACION
+            if saturado:
+                c.execute(
+                    "UPDATE tareas SET max_intentos=greatest(max_intentos,%s) WHERE id=%s",
+                    (INTENTOS_SATURACION, t["id"]),
+                )
+            elif t["tipo"] in AGENTES:
+                # Si antes hubo saturación, los demás errores vuelven a su tope normal.
+                c.execute(
+                    "UPDATE tareas SET max_intentos=least(max_intentos,greatest(intentos,%s)) "
+                    "WHERE id=%s",
+                    (INTENTOS_NORMALES, t["id"]),
+                )
             if t["tipo"] in AGENTES and sin_reintento(exc):
                 c.execute("UPDATE tareas SET max_intentos=intentos WHERE id=%s", (t["id"],))
             state = uno(
@@ -217,6 +297,14 @@ def procesar(t: db.Row) -> None:
                     else "La tarea no pudo completarse; revise integración y datos",
                 ),
             )["estado"]
+            if saturado and state == "reprogramada":
+                espera = ESPERAS_SATURACION_MIN[
+                    min(int(t["intentos"]), len(ESPERAS_SATURACION_MIN)) - 1
+                ]
+                c.execute(
+                    "UPDATE tareas SET ejecutar_desde=now()+make_interval(mins=>%s) WHERE id=%s",
+                    (espera, t["id"]),
+                )
             auth_error = (
                 isinstance(exc, RefreshError)
                 or isinstance(exc, HttpError)

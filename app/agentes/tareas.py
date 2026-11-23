@@ -228,9 +228,20 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
         from app.agentes import buscador
 
         if buscador.usar_tavily():
-            paginas, hechas = buscador.candidatos(entrada)
+            guardadas = payload.get("_paginas")
+            if isinstance(guardadas, list):
+                # Reintento: las páginas ya se buscaron y leyeron en un intento anterior.
+                # No se repite la búsqueda en la web (ni se pagan otra vez los créditos).
+                paginas, hechas = guardadas, 0
+            else:
+                paginas, hechas = buscador.candidatos(entrada)
             with transaccion("agente:investigador", accion="buscar_tavily") as c:
                 actualizar(c, "busquedas_descubrimiento", str(busqueda["id"]), {"progreso": 50})
+                if not isinstance(guardadas, list):
+                    c.execute(
+                        "UPDATE tareas SET datos=datos||%s WHERE id=%s",
+                        (Jsonb({"_paginas": paginas}), tarea_id),
+                    )
                 precio = config().tavily_costo_credito_usd
                 if precio > 0 and hechas:
                     insertar(
@@ -405,6 +416,8 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     "error": None,
                 },
             )
+            # Las páginas guardadas solo servían para reintentar.
+            c.execute("UPDATE tareas SET datos=datos-'_paginas' WHERE id=%s", (tarea_id,))
         elif tipo == "clasificar_respuesta":
             current = obtener(c, "respuestas", str(respuesta["id"]), True)
             if not current["clasificacion_confirmada"]:

@@ -15,7 +15,8 @@ from app.config import config
 T = TypeVar("T", bound=BaseModel)
 
 # Espera total máxima por ejecución ante límites por minuto o saturación (segundos).
-# La tarea completa tiene 600 s; el resto de reintentos los hace la cola (1 y 5 minutos).
+# La tarea completa tiene 600 s; el resto de reintentos los hace la cola (ante saturación,
+# hasta 10 intentos en unas 6 horas; ver trabajador.ESPERAS_SATURACION_MIN).
 ESPERA_MAXIMA = 90.0
 INTENTOS_POR_LLAMADA = 3
 

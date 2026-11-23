@@ -1,7 +1,8 @@
 # ruff: noqa: F811
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -244,14 +245,151 @@ def test_busqueda_reintenta_tras_429_sin_chocar_con_el_tope(auth, monkeypatch):
         b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
         assert b["estado"] == "terminada" and b["error"] is None
 
-    # Una cuota diaria agotada no se arregla en 1 o 5 minutos: falla ya, con el motivo.
+    # Una cuota diaria agotada no se arregla en 1 o 5 minutos: la búsqueda espera al
+    # reinicio de la cuota (medianoche del Pacífico) sin gastar intentos.
     busqueda, tarea = nueva()
+    salidas.append(FalloProveedor(CUOTA_DIARIA_GRATIS, {}, reintentable=False))
+    t = intentar(tarea)
+    assert t["estado"] == "pendiente" and t["intentos"] == 0
+    assert t["datos"]["_esperasCuota"] == 1
+    reanuda = t["ejecutar_desde"].astimezone(ZoneInfo("America/Los_Angeles"))
+    assert (reanuda.hour, reanuda.minute) == (0, 5)
+    assert timedelta(0) < t["ejecutar_desde"] - datetime.now(timezone.utc) <= timedelta(days=1)
+    with transaccion() as c:
+        b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
+        assert b["estado"] == "en_cola" and "cuota diaria del plan gratuito" in b["error"]
+        assert "La búsqueda seguirá sola el " in b["error"] and "hora de Colombia" in b["error"]
+    # Tras una semana entera sin cuota se rinde y lo dice.
+    with transaccion() as c:
+        c.execute(
+            "UPDATE tareas SET datos=datos||'{\"_esperasCuota\": 7}'::jsonb WHERE id=%s", (tarea,)
+        )
     salidas.append(FalloProveedor(CUOTA_DIARIA_GRATIS, {}, reintentable=False))
     t = intentar(tarea)
     assert t["estado"] == "fallida" and t["intentos"] == 1
     with transaccion() as c:
         b = uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,))
         assert b["estado"] == "error" and "cuota diaria del plan gratuito" in b["error"]
+
+
+def test_saturacion_espera_mas_y_no_repite_la_busqueda_web(auth, monkeypatch):
+    """Gemini saturado (503): 10 intentos en unas 6 horas y la web se busca una sola vez."""
+    from app.agentes.errores import FalloProveedor
+    from app.agentes.gemini import SATURADO
+    from app.tareas.trabajador import ESPERAS_SATURACION_MIN, procesar
+
+    cfg = config()
+    monkeypatch.setattr(cfg, "agente_proveedor", "gemini")
+    monkeypatch.setattr(cfg, "gemini_api_key", SecretStr("prueba"))
+    monkeypatch.setattr(cfg, "tavily_api_key", SecretStr("tvly-prueba"))
+    monkeypatch.setattr(cfg, "buscador_descubrimiento", "auto")
+    monkeypatch.setattr(cfg, "tavily_costo_credito_usd", 0.01)
+    busquedas_web: list = []
+
+    def candidatos(criterios):
+        busquedas_web.append(criterios)
+        return [{"url": "https://empresa.example/", "titulo": "Empresa", "texto": "Empresa"}], 3
+
+    monkeypatch.setattr("app.agentes.buscador.candidatos", candidatos)
+    salidas: list = []
+
+    class Proveedor:
+        def ejecutar(self, modelo, prompt, entrada, schema, max_tokens):
+            salida = salidas.pop(0)
+            if isinstance(salida, Exception):
+                raise salida
+            return schema.model_validate(salida), {"input_tokens": 1000, "output_tokens": 100}
+
+    monkeypatch.setattr("app.agentes.gemini.GeminiReal", Proveedor)
+    with transaccion() as c:
+        b = insertar(c, "busquedas_descubrimiento", {"consulta": "Empresas de Palmira"})
+        busqueda = str(b["id"])
+        clave = str(uuid4())
+        encolar(c, "descubrir_empresas", {"busquedaId": busqueda}, clave)
+        tarea = str(uno(c, "SELECT id FROM tareas WHERE clave_unica=%s", (clave,))["id"])
+        costos = uno(c, "SELECT count(*) AS n FROM costos WHERE concepto LIKE 'Tavily:%%'")["n"]
+
+    def intentar():
+        with transaccion() as c:
+            t = uno(
+                c,
+                "UPDATE tareas SET estado='en_proceso',tomada_por='prueba',tomada_en=now(),"
+                "intentos=intentos+1 WHERE id=%s RETURNING *",
+                (tarea,),
+            )
+        procesar(t)
+        with transaccion() as c:
+            return (
+                uno(c, "SELECT *, ejecutar_desde-now() AS falta FROM tareas WHERE id=%s", (tarea,)),
+                uno(c, "SELECT * FROM busquedas_descubrimiento WHERE id=%s", (busqueda,)),
+            )
+
+    saturado = FalloProveedor(SATURADO.format(status=503), {}, reintentable=True)
+    for n in range(1, 10):
+        salidas.append(saturado)
+        t, b = intentar()
+        assert t["estado"] == "pendiente" and t["intentos"] == n and t["max_intentos"] == 10
+        espera = timedelta(minutes=ESPERAS_SATURACION_MIN[n - 1])
+        assert espera - timedelta(seconds=30) < t["falta"] <= espera
+        assert b["estado"] == "en_cola" and b["error"].startswith(f"Intento {n} de 10 sin éxito")
+    assert sum(ESPERAS_SATURACION_MIN) >= 5 * 60
+    # La web se buscó una sola vez y se cobró una sola vez; los reintentos usan esas páginas.
+    assert len(busquedas_web) == 1 and "_paginas" in t["datos"]
+    with transaccion() as c:
+        assert (
+            uno(c, "SELECT count(*) AS n FROM costos WHERE concepto LIKE 'Tavily:%%'")["n"]
+            == costos + 1
+        )
+    # El décimo intento funciona: termina y borra las páginas guardadas.
+    salidas.append({"empresas": []})
+    t, b = intentar()
+    assert t["estado"] == "completada" and "_paginas" not in t["datos"]
+    assert b["estado"] == "terminada" and b["error"] is None and len(busquedas_web) == 1
+
+
+def test_otros_errores_conservan_sus_4_intentos(auth, monkeypatch):
+    """Tras una saturación, un error de otro tipo vuelve al tope normal de intentos."""
+    from app.agentes.errores import FalloProveedor
+    from app.agentes.gemini import SATURADO
+    from app.tareas.trabajador import procesar
+
+    cfg = config()
+    monkeypatch.setattr(cfg, "agente_proveedor", "gemini")
+    monkeypatch.setattr(cfg, "gemini_api_key", SecretStr("prueba"))
+    monkeypatch.setattr(cfg, "buscador_descubrimiento", "proveedor")
+    salidas: list = []
+
+    class Proveedor:
+        def ejecutar(self, modelo, prompt, entrada, schema, max_tokens):
+            raise salidas.pop(0)
+
+    monkeypatch.setattr("app.agentes.gemini.GeminiReal", Proveedor)
+    with transaccion() as c:
+        b = insertar(c, "busquedas_descubrimiento", {"consulta": "Empresas de Palmira"})
+        clave = str(uuid4())
+        encolar(c, "descubrir_empresas", {"busquedaId": str(b["id"])}, clave)
+        tarea = str(uno(c, "SELECT id FROM tareas WHERE clave_unica=%s", (clave,))["id"])
+
+    def intentar(exc):
+        salidas.append(exc)
+        with transaccion() as c:
+            t = uno(
+                c,
+                "UPDATE tareas SET estado='en_proceso',tomada_por='prueba',tomada_en=now(),"
+                "intentos=intentos+1 WHERE id=%s RETURNING *",
+                (tarea,),
+            )
+        procesar(t)
+        with transaccion() as c:
+            return uno(c, "SELECT * FROM tareas WHERE id=%s", (tarea,))
+
+    assert intentar(FalloProveedor(SATURADO.format(status=503), {}))["max_intentos"] == 10
+    incompleta = FalloProveedor("Gemini devolvió una salida bloqueada o incompleta", {})
+    t = intentar(incompleta)
+    assert t["estado"] == "pendiente" and t["max_intentos"] == 4
+    intentar(incompleta)
+    t = intentar(incompleta)
+    assert t["estado"] == "fallida" and t["intentos"] == 4
 
 
 def test_programacion_opcional_idempotente_y_nacional(auth, monkeypatch):

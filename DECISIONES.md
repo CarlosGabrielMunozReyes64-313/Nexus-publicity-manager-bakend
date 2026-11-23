@@ -163,3 +163,12 @@ Reemplaza la pantalla de Propuestas para las rutas de correo. Todo vive en «Sec
 - **Cuándo.** Al encender la política (sobre los pendientes; la respuesta dice cuántos) y cada vez que el verificador revisa un correo, antes de calcular la elegibilidad. Apagarla no deshace lo aprobado.
 - **Límites que se mantienen.** La elegibilidad sigue exigiendo correo `valido`, y las bajas y supresiones prevalecen. La IA no interviene: es una regla del backend, sin datos de contacto enviados a ningún modelo.
 - **Aviso.** Que la base legal sea suficiente depende del caso (Ley 1581 de 2012: el correo corporativo de un empleado se considera dato personal). La política es una decisión del administrador.
+
+## Más paciencia ante Gemini saturado y cuota diaria (23 de noviembre de 2026)
+
+- **Problema.** Una búsqueda con Gemini saturado (503) se rendía tras 4 intentos en unos 36 minutos (esperas de 1, 5 y 30 minutos), y cada reintento repetía la búsqueda en la web y volvía a pagar Tavily. Con cientos de búsquedas en cola, una caída de Google de una hora dejaba muchas en error.
+- **Saturación o límite por minuto** (Gemini 500/502/503/504 y 429 por minuto o capacidad; Claude transitorios y 429): las tareas de IA pasan a 10 intentos con esperas de 1, 5, 15 y 30 minutos y luego cada hora (unas 6 horas en total). Lo hace el trabajador después de `terminar_tarea`; no cambia el esquema ni hay migración. Si después llega un error de otro tipo, la tarea vuelve a su tope normal de 4 intentos, para no pagar 10 veces una salida mala.
+- **Cuota diaria agotada** (antes fallaba al instante): la tarea espera a las 00:05 del Pacífico, la hora en que Google reinicia las cuotas diarias según su documentación de límites. No gasta intentos. La búsqueda dice cuándo seguirá, en hora de Colombia. Tras 7 días seguidos sin cuota se rinde con el motivo. Los errores que no se arreglan esperando (sin cuota en el plan, clave inválida, búsqueda que requiere pago, cuota mensual) siguen fallando de inmediato.
+- **Búsqueda en la web una sola vez:** las páginas encontradas por Tavily se guardan en `tareas.datos._paginas` (solo texto público de sitios web, que de todos modos va al modelo) y los reintentos las reutilizan, sin volver a cobrar. Se borran al terminar bien la búsqueda.
+- **La cola no se bloquea:** una tarea reprogramada espera su hora mientras el trabajador sigue con las demás.
+
