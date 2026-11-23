@@ -1,5 +1,15 @@
 # Validación ejecutada — 22 de noviembre de 2026
 
+**Actualización del 23 de noviembre de 2026 (meta diaria y Terminal, migración 0007):** pytest 133 aprobadas. `pruebas/test_meta_terminal.py` (6) comprueba:
+- la validación y el guardado de la meta, con auditoría;
+- una búsqueda a la vez, un tipo y un municipio por búsqueda, rotación y tope del día;
+- la parada al cumplir la meta y la pausa tras 3 fallos;
+- la aceptación sola solo de lo corroborado con correo genérico del dominio (el correo personal queda pendiente, y con la meta cumplida también), con las líneas de la bitácora sin «@»;
+- la Terminal: trabajador, cola, «empieza», «listo en», el aviso de 503 con el próximo intento y `?desde=`;
+- la bajada de 0007 a 0006 y la subida.
+
+Contrato: 71 respuestas reales aprobadas por Zod. El recorrido en Chrome con el trabajador real (ver VALIDACION del frontend) también pasó. Ruff y mypy estricto sin errores en `app`.
+
 **Actualización del 23 de noviembre de 2026 (paciencia ante Gemini saturado):** pytest 127 aprobadas. `test_saturacion_espera_mas_y_no_repite_la_busqueda_web` comprueba 9 fallos 503 seguidos con «Intento n de 10» y las esperas de 1, 5, 15, 30 y 60 minutos; que la web se busca y se cobra una sola vez; y que el décimo intento termina y borra las páginas guardadas. `test_otros_errores_conservan_sus_4_intentos` comprueba que un error de otro tipo vuelve al tope de 4 intentos. La prueba de cuota diaria ahora comprueba la espera hasta las 00:05 del Pacífico sin gastar intentos, el aviso con la hora de Colombia y la rendición tras 7 días. Ruff y mypy estricto sin errores en `app`.
 
 **Actualización del 23 de noviembre de 2026 (aprobación automática de la base legal, migración 0006):** pytest 125 aprobadas sobre PostgreSQL 16. `pruebas/test_aprobacion_legal.py` comprueba que la política viene apagada y no aprueba nada, que rechaza un valor no booleano, que al encenderla aprueba los contactos con correo publicado y cita verificada (con tipo, texto, prueba, aprobador, etapa y auditoría), que deja pendiente el contacto sin página, que aprueba tal cual lo que registró el administrador, que verificar un correo nuevo lo aprueba, y que apagada vuelve a esperar al administrador. También comprueba que 0006 baja a 0005 (sin la clave y con el CHECK anterior) y vuelve a subir. Contrato: 69 respuestas reales aprobadas por Zod, incluida `configuracion/cumplimiento`. Ruff y mypy estricto sin errores.

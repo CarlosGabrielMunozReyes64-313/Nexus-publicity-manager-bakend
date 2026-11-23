@@ -55,12 +55,31 @@ def leer(ruta: str, request: Request) -> Any:
                 "SELECT * FROM inscripciones WHERE campana_id=%s ORDER BY inscrita_en",
                 (ident,),
             )
+        elif ruta == "descubrimiento/meta":
+            from app.agentes.descubrimiento import estado_meta
+
+            result = estado_meta(c, datos.ahora())
+        elif ruta == "terminal":
+            from app.tareas.bitacora import terminal
+
+            desde = params.get("desde", "")
+            result = terminal(c, int(desde) if desde.isdigit() else None)
         elif recurso == "descubrimiento" and ident == "busquedas":
             result = (
                 lecturas.busqueda(c, obtener(c, "busquedas_descubrimiento", parts[2]))
                 if len(parts) == 3
                 else lecturas.busquedas(
-                    c, todos(c, "SELECT * FROM busquedas_descubrimiento ORDER BY creada_en DESC")
+                    c,
+                    # La meta diaria lanza decenas de búsquedas al día: solo las recientes.
+                    todos(
+                        c,
+                        "SELECT * FROM busquedas_descubrimiento ORDER BY creada_en DESC LIMIT %s",
+                        (
+                            max(1, min(int(params["limite"]), 500))
+                            if str(params.get("limite", "")).isdigit()
+                            else 50,
+                        ),
+                    ),
                 )
             )
         elif ruta == "informes/recomendaciones":
@@ -296,6 +315,10 @@ def mutacion(
         datos.suprimir(c, body)
     elif recurso == "configuracion" and method == "PUT" and ident == "cumplimiento":
         return datos.guardar_cumplimiento(c, body, admin)
+    elif ruta == "descubrimiento/meta" and method == "PUT":
+        from app.agentes.descubrimiento import guardar_meta
+
+        return guardar_meta(c, body, admin)
     elif (
         recurso == "configuracion"
         and method == "PUT"

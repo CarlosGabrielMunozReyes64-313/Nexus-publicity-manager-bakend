@@ -36,7 +36,7 @@ def test_todas_las_lecturas_con_datos(auth):
                 detail=auth.get('/api/'+path+'/'+ident+'/'+suffix)
                 assert detail.status_code==200
                 records.append({'ruta':path+'/'+ident+'/'+suffix,'schema':'interaccion' if path=='contactos' else 'inscripcion','array':True,'data':detail.json()})
-    for path,schema in {'configuracion/marca':'marca','configuracion/limites':'limites','configuracion/cliente-ideal':'clienteIdeal','configuracion/cumplimiento':'cumplimiento','panel/resumen':'resumen','embudo':'embudo','embudo?desde=2026-01-01&hasta=2026-12-31':'embudo','auth/session':'ok','auditoria/pagina?tamano=5&accion=a':'paginaAuditoria'}.items():
+    for path,schema in {'configuracion/marca':'marca','configuracion/limites':'limites','configuracion/cliente-ideal':'clienteIdeal','configuracion/cumplimiento':'cumplimiento','descubrimiento/meta':'metaDescubrimiento','terminal':'terminal','panel/resumen':'resumen','embudo':'embudo','embudo?desde=2026-01-01&hasta=2026-12-31':'embudo','auth/session':'ok','auditoria/pagina?tamano=5&accion=a':'paginaAuditoria'}.items():
         res=auth.get('/api/'+path)
         assert res.status_code==200,(path,res.text)
         records.append({'ruta':path,'schema':schema,'array':False,'data':res.json()})

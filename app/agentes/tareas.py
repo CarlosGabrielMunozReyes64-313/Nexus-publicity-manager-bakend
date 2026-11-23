@@ -21,6 +21,7 @@ from app.config import config
 from app.db import Row, actualizar, insertar, obtener, todos, transaccion, uno
 from app.dominio.reglas import BOGOTA, reglas_validas, validar_secuencia
 from app.esquemas.serializar import serializar
+from app.tareas.bitacora import anotar, evento, nombre_empresa, plural
 
 
 def fuentes(datos_extraidos: list[Any], dominio: str | None = None) -> list[Row]:
@@ -233,8 +234,19 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                 # Reintento: las páginas ya se buscaron y leyeron en un intento anterior.
                 # No se repite la búsqueda en la web (ni se pagan otra vez los créditos).
                 paginas, hechas = guardadas, 0
+                anotar(
+                    f"Se reutiliza{'n' if len(paginas) != 1 else ''} "
+                    f"{plural(len(paginas), 'página', 'páginas')} del intento anterior; no se "
+                    "vuelve a buscar en la web.",
+                    tarea_id=tarea_id,
+                )
             else:
                 paginas, hechas = buscador.candidatos(entrada)
+                anotar(
+                    f"Búsqueda en la web (Tavily): {plural(hechas, 'consulta', 'consultas')}, "
+                    f"{plural(len(paginas), 'página leída', 'páginas leídas')}.",
+                    tarea_id=tarea_id,
+                )
             with transaccion("agente:investigador", accion="buscar_tavily") as c:
                 actualizar(c, "busquedas_descubrimiento", str(busqueda["id"]), {"progreso": 50})
                 if not isinstance(guardadas, list):
@@ -354,9 +366,17 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
             for item in ev:
                 insertar(c, "evidencias", {"propuesta_id": prop["id"], **item})
         elif tipo == "descubrir_empresas":
-            from app.agentes.descubrimiento import corroborados, importar
+            from app.agentes.descubrimiento import aceptar_meta, corroborados, importar
 
             automatico = bool(payload.get("autoImportar"))
+            meta = bool(payload.get("meta"))
+            solas: list[str] = []
+            evento(
+                c,
+                f"El modelo devolvió {plural(len(result.empresas), 'empresa', 'empresas')}; "
+                "se comprueba cada dato en su sitio oficial.",
+                tarea_id=tarea_id,
+            )
             limite = (
                 min(5, max(1, int(payload.get("limite", 5))))
                 if automatico
@@ -405,6 +425,29 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     insertar(c, "evidencias", {"resultado_id": r["id"], **item})
                 if automatico and not duplicate:
                     importar(c, r, comprobadas)
+                elif meta and not duplicate and aceptar_meta(c, r, comprobadas):
+                    solas.append(x.razonSocial)
+            for nombre in solas:
+                evento(
+                    c,
+                    f"Aceptada sola (meta diaria): {nombre_empresa(nombre)}. Empresa y contacto "
+                    "creados.",
+                    "exito",
+                    tarea_id,
+                )
+            guardados = uno(
+                c,
+                "SELECT count(*) AS n FROM resultados_descubrimiento WHERE busqueda_id=%s",
+                (busqueda["id"],),
+            )["n"]
+            evento(
+                c,
+                f"Búsqueda terminada: {plural(guardados, 'empresa comprobada', 'empresas comprobadas')}"
+                + (f", {plural(len(solas), 'aceptada sola', 'aceptadas solas')}" if meta else "")
+                + ".",
+                "exito",
+                tarea_id,
+            )
             actualizar(
                 c,
                 "busquedas_descubrimiento",

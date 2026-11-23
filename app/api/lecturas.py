@@ -408,11 +408,26 @@ def busquedas(c: Conn, filas: list[Row]) -> list[Row]:
                 "estado": x["estado"],
             }
         )
+    de_meta = (
+        {
+            t["b"]
+            for t in todos(
+                c,
+                "SELECT datos->>'busquedaId' AS b FROM tareas WHERE tipo='descubrir_empresas' "
+                "AND datos->>'meta'='true' AND datos->>'busquedaId'=ANY(%s)",
+                ([str(i) for i in ids],),
+            )
+        }
+        if ids
+        else set()
+    )
     return [
         {
             **r,
             "criterios": {k: r[k] for k in ("consulta", "municipios", "sectores", "tamano")},
             "resultados": por_busqueda.get(str(r["id"]), []),
+            # Solo presente en las búsquedas que lanzó la meta diaria.
+            **({"meta": True} if str(r["id"]) in de_meta else {}),
         }
         for r in filas
     ]

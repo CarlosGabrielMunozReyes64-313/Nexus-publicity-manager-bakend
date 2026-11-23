@@ -5,11 +5,15 @@ from app.dominio.reglas import BOGOTA
 
 
 def programar(c: Conn, ahora: datetime) -> None:
-    from app.agentes.descubrimiento import programar_descubrimiento
+    from app.agentes.descubrimiento import programar_descubrimiento, programar_meta
     from app.agentes.ejecutor import proveedor_ia_listo
+    from app.tareas.bitacora import limpiar
 
     now = ahora.astimezone(BOGOTA)
     programar_descubrimiento(c, now)
+    programar_meta(c, now)
+    if now.minute == 0 and now.second < 15:
+        limpiar(c)
     minute = now.strftime("%Y-%m-%dT%H:%M")
     integraciones = {
         r["id"] for r in todos(c, "SELECT id FROM integraciones WHERE estado='conectada'")

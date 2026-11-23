@@ -27,6 +27,8 @@ from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
 from app.dominio.reglas import BOGOTA
 from app.integraciones.conexiones import pausar_todo
+from app.tareas.bitacora import RUTINARIAS, describir, evento, latido
+from app.tareas.bitacora import hora as hora_bogota
 from app.tareas.programador import programar
 
 AGENTES = {
@@ -69,11 +71,11 @@ def tras_reinicio_de_cuota(momento: datetime) -> datetime:
     return datetime(dia.year, dia.month, dia.day, 0, 5, tzinfo=PACIFICO)
 
 
-def esperar_cuota(c: db.Conn, t: db.Row, motivo: str) -> bool:
-    """Reprograma la tarea al reinicio de la cuota diaria. False si ya esperó demasiado."""
+def esperar_cuota(c: db.Conn, t: db.Row, motivo: str) -> datetime | None:
+    """Reprograma la tarea al reinicio de la cuota diaria. None si ya esperó demasiado."""
     esperas = int((t["datos"] or {}).get("_esperasCuota", 0))
     if esperas >= ESPERAS_CUOTA_MAX:
-        return False
+        return None
     reanuda = tras_reinicio_de_cuota(ahora())
     c.execute(
         "UPDATE tareas SET estado='pendiente',ejecutar_desde=%s,tomada_por=NULL,tomada_en=NULL,"
@@ -93,7 +95,7 @@ def esperar_cuota(c: db.Conn, t: db.Row, motivo: str) -> bool:
                 "Google reinicie la cuota.",
             },
         )
-    return True
+    return reanuda
 
 
 def manejar(t: db.Row) -> None:
@@ -248,10 +250,25 @@ def detalle_seguro(exc: Exception) -> str:
     return "Error no clasificado; requiere diagnóstico adicional"
 
 
+def anotar_inicio(t: db.Row) -> None:
+    if t["tipo"] in RUTINARIAS:
+        return
+    try:
+        with transaccion("proceso:trabajador") as c:
+            intento = (
+                f" (intento {t['intentos']} de {t['max_intentos']})" if t["intentos"] > 1 else ""
+            )
+            evento(c, f"{describir(c, t)}: empieza{intento}.", "info", t["id"])
+    except Exception as exc:  # pragma: no cover - la bitácora nunca detiene una tarea
+        log.warning("bitacora_fallida", clase=type(exc).__name__)
+
+
 def procesar(t: db.Row) -> None:
+    inicio = time.monotonic()
     try:
         signal.signal(signal.SIGALRM, timeout)
         signal.alarm(600 if t["tipo"] in AGENTES else 180)
+        anotar_inicio(t)
         manejar(t)
         with transaccion("proceso:trabajador") as c:
             if t["tipo"] == "enviar_mensaje":
@@ -263,6 +280,9 @@ def procesar(t: db.Row) -> None:
                     )
                     return
             c.execute("SELECT terminar_tarea(%s,true)", (t["id"],))
+            if t["tipo"] not in RUTINARIAS:
+                segundos = round(time.monotonic() - inicio)
+                evento(c, f"{describir(c, t)}: listo en {segundos} s.", "exito", t["id"])
     except Exception as exc:
         # Do not log provider payloads, addresses, credentials or email bodies.
         log.warning(
@@ -270,8 +290,18 @@ def procesar(t: db.Row) -> None:
         )
         motivo = detalle_seguro(exc)
         with transaccion("proceso:trabajador") as c:
-            if t["tipo"] in AGENTES and motivo in CUOTAS_DIARIAS and esperar_cuota(c, t, motivo):
-                return
+            descripcion = describir(c, t)
+            if t["tipo"] in AGENTES and motivo in CUOTAS_DIARIAS:
+                reanuda = esperar_cuota(c, t, motivo)
+                if reanuda:
+                    evento(
+                        c,
+                        f"{descripcion}: {motivo}. Seguirá sola el "
+                        f"{reanuda.astimezone(BOGOTA):%d/%m} a las {hora_bogota(reanuda)}.",
+                        "aviso",
+                        t["id"],
+                    )
+                    return
             saturado = t["tipo"] in AGENTES and motivo in SATURACION
             if saturado:
                 c.execute(
@@ -305,6 +335,21 @@ def procesar(t: db.Row) -> None:
                     "UPDATE tareas SET ejecutar_desde=now()+make_interval(mins=>%s) WHERE id=%s",
                     (espera, t["id"]),
                 )
+            fila = uno(
+                c,
+                "SELECT intentos,max_intentos,ejecutar_desde FROM tareas WHERE id=%s",
+                (t["id"],),
+            )
+            if state == "reprogramada":
+                evento(
+                    c,
+                    f"{descripcion}: {motivo}. Intento {fila['intentos']} de "
+                    f"{fila['max_intentos']}; nuevo intento a las {hora_bogota(fila['ejecutar_desde'])}.",
+                    "aviso",
+                    t["id"],
+                )
+            else:
+                evento(c, f"{descripcion}: falló. {motivo}.", "error", t["id"])
             auth_error = (
                 isinstance(exc, RefreshError)
                 or isinstance(exc, HttpError)
@@ -372,6 +417,7 @@ def main() -> None:
     try:
         while True:
             with transaccion("proceso:programador") as c:
+                latido(c, worker)
                 programar(c, ahora())
                 tareas = db.todos(c, "SELECT * FROM tomar_tareas(%s,1)", (worker,))
             for t in tareas:
