@@ -217,6 +217,14 @@ def cambiar(c: Conn, ident: str, accion: str) -> dict[str, str]:
                 siteUrl=cfg.search_console_sitio,
                 body={"startDate": day, "endDate": day, "rowLimit": 1},
             ).execute()
+        if ident == "verificador":
+            from app.api.datos import verificar_pendientes
+
+            # Los correos guardados sin verificador quedaron «desconocido»: se verifican ahora.
+            n = verificar_pendientes(c)
+            detalle = (
+                f"Conexión comprobada. Se verificarán {n} correos pendientes." if n else detalle
+            )
         actualizar(
             c,
             "integraciones",

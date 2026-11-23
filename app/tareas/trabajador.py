@@ -11,6 +11,7 @@ from googleapiclient.errors import HttpError
 from app import db
 from app.agentes.errores import FalloProveedor
 from app.api.datos import ahora
+from app.api.rutas_correo import SIN_ELEGIBLES
 from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
 from app.dominio.reglas import BOGOTA
@@ -115,7 +116,7 @@ DEFINITIVOS = {
     "El segmento requiere aprobación",
     "No hay contactos elegibles con base legal aprobada",
     "El Segmentador propuso reglas no válidas",
-    "El segmento no tiene contactos elegibles con base legal aprobada",
+    SIN_ELEGIBLES,
 }
 # Prefijos de mensajes del validador de rutas (los motivos los escribe este backend).
 PREFIJOS_DEFINITIVOS = (
@@ -169,7 +170,7 @@ def detalle_seguro(exc: Exception) -> str:
         "Tipo de tarea no registrado",
         "El segmento requiere aprobación",
         "No hay contactos elegibles con base legal aprobada",
-        "El segmento no tiene contactos elegibles con base legal aprobada",
+        SIN_ELEGIBLES,
     }
     if isinstance(exc, ValueError) and (
         texto in permitidos

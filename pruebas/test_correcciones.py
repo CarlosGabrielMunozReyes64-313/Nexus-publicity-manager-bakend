@@ -838,3 +838,64 @@ def test_responder_exige_gmail_conectado(auth):
         # No dejar envíos programados con la hora real: otras pruebas usan relojes falsos.
         c.execute("UPDATE mensajes SET estado='cancelado' WHERE en_respuesta_a=%s", (r["id"],))
         actualizar(c, "integraciones", "gmail", {"estado": "desconectada", "credenciales_cifradas": None})
+
+
+def test_verificar_correo_a_pedido_y_pendientes_al_conectar_hunter(auth, monkeypatch):
+    """Los correos guardados sin verificador no quedan «desconocido» para siempre."""
+    from app.integraciones import hunter
+    import app.integraciones.conexiones as conexiones
+
+    with transaccion("admin") as c:
+        admin = admin_id(c)
+        c.execute("SELECT set_config('nexus.administrador_id',%s,true)", (admin,))
+        e = insertar(c, "empresas", {"razon_social": "Verificación " + uuid4().hex[:6], "municipio": "Palmira"})
+        ids = []
+        for i in range(2):
+            ct = insertar(
+                c,
+                "contactos",
+                {"empresa_id": e["id"], "nombre": f"Pendiente {i}", "correo": f"p{i}@{uuid4().hex}.example", "origen": "manual"},
+            )
+            insertar(
+                c,
+                "bases_legales",
+                {"contacto_id": ct["id"], "tipo": "autorizacion_registrada", "texto": "Consentimiento ficticio", "prueba": "Fixture", "aprobada_por": admin, "aprobada_en": datetime.now(timezone.utc)},
+            )
+            ids.append(str(ct["id"]))
+        sin_correo = insertar(c, "contactos", {"empresa_id": e["id"], "nombre": "Sin correo", "origen": "manual"})
+        assert uno(c, "SELECT motivo_no_elegible(%s) AS m", (ids[0],))["m"] == "Se requiere un correo válido"
+
+    def tareas(ident):
+        with transaccion() as c:
+            return uno(c, "SELECT count(*) AS n FROM tareas WHERE tipo='verificar_correo' AND estado='pendiente' AND datos->>'contactoId'=%s", (ident,))["n"]
+
+    # A pedido, desde la ficha del contacto.
+    antes = tareas(ids[0])
+    r = auth.post(f"/api/contactos/{ids[0]}/verificar-correo", json={})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert tareas(ids[0]) == antes + 1
+    r = auth.post(f"/api/contactos/{sin_correo['id']}/verificar-correo", json={})
+    assert r.status_code == 400 and r.json()["message"] == "El contacto no tiene correo"
+    assert auth.post(f"/api/contactos/{uuid4()}/verificar-correo", json={}).status_code == 404
+
+    # Al conectar Hunter se encolan todos los pendientes.
+    class Respuesta:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(config(), "hunter_api_key", SecretStr("hunter-de-prueba"))
+    monkeypatch.setattr(conexiones.httpx, "get", lambda *a, **k: Respuesta())
+    antes = [tareas(i) for i in ids]
+    r = auth.post("/api/integraciones/verificador/conectar", json={})
+    assert r.status_code == 200 and r.json()["estado"] == "conectada", r.text
+    assert "Se verificarán" in r.json()["detalle"]
+    assert [tareas(i) for i in ids] == [n + 1 for n in antes]
+
+    # El resultado lo pone el verificador: con «valid» el contacto pasa a ser elegible.
+    with transaccion("proceso:verificador") as c:
+        hunter.verificar(c, ids[1], hunter.HunterFalso({"status": "valid"}))
+    with transaccion() as c:
+        assert uno(c, "SELECT estado_correo FROM contactos WHERE id=%s", (ids[1],))["estado_correo"] == "valido"
+        assert uno(c, "SELECT motivo_no_elegible(%s) AS m", (ids[1],))["m"] is None
+        c.execute("UPDATE tareas SET estado='cancelada', terminada_en=now() WHERE tipo='verificar_correo' AND estado='pendiente'")
+    auth.post("/api/integraciones/verificador/desconectar", json={})

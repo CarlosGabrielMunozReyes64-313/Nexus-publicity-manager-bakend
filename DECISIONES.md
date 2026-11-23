@@ -146,3 +146,10 @@ Reemplaza la pantalla de Propuestas para las rutas de correo. Todo vive en «Sec
   - Se añadió DELETE al enrutador. Como toda mutación, exige `Content-Type: application/json` y el mismo origen.
 - **Archivar.** Una campaña activa no se archiva (409 «Pause la campaña antes de archivar la secuencia»). Una secuencia archivada no admite borradores ni aprobación.
 - **Despliegue.** Primero el backend y después el frontend. El comando previo al despliegue en Railway sigue siendo `alembic upgrade head`, que aplica 0005. La dependencia nueva `nh3` está en `pyproject.toml` y `requirements.lock`.
+
+## Verificar correos pendientes (23 de noviembre de 2026)
+
+- **El problema.** Un contacto solo es elegible con un correo `valido`, y ese estado solo lo pone el verificador (DNS + Hunter). Antes, la verificación se encolaba únicamente al crear el contacto o al cambiar su correo. Los contactos guardados sin Hunter conectado quedaban «desconocido» para siempre y no había forma de verificarlos de nuevo.
+- **`POST /contactos/:id/verificar-correo`.** Encola `verificar_correo` para ese contacto y responde `{ok:true}`. Responde 400 si el contacto no tiene correo y 409 si está excluido o anonimizado. Queda en la auditoría como `verificar_correo`. El estado nunca se marca a mano.
+- **Al conectar el verificador.** Se encolan todos los correos en estado `desconocido` de contactos no excluidos ni anonimizados, y el detalle de la integración dice cuántos.
+- **Mensaje.** «El segmento no tiene contactos elegibles» ahora dice también que hace falta un correo verificado, no solo la base legal. El trabajador usa la misma constante para tratarlo como fallo definitivo.

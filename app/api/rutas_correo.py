@@ -33,7 +33,10 @@ ESTADOS_SOLICITUD = {
 }
 # Variables de datos (no de sistema) y el campo de evidencia que las respalda.
 VARIABLES_DATOS = ("nombre", "empresa", "senal", "cargo", "municipio")
-SIN_ELEGIBLES = "El segmento no tiene contactos elegibles con base legal aprobada"
+SIN_ELEGIBLES = (
+    "El segmento no tiene contactos elegibles: cada contacto necesita base legal aprobada "
+    "y un correo verificado como válido"
+)
 SEGMENTO_SIN_APROBAR = "El segmento requiere aprobación"
 SECUENCIA_ARCHIVADA = "La secuencia está archivada"
 VENTANA_GLOBAL = (

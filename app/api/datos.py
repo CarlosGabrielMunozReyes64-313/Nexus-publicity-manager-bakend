@@ -1,7 +1,7 @@
 import re
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from psycopg import errors as pg_errors
@@ -9,7 +9,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from app.api.lecturas import contacto, empresa
-from app.db import Conn, Row, actualizar, encolar, insertar, obtener, todos, uno
+from app.db import Conn, Row, actualizar, auditar, encolar, insertar, obtener, todos, uno
 from app.dominio.reglas import ETAPAS, dominio, telefono
 from app.esquemas.entradas import Contacto, Empresa
 from app.esquemas.serializar import serializar
@@ -125,6 +125,45 @@ def guardar_contacto(c: Conn, body: Row, ident: str | None = None) -> Row:
     if changed and r["correo"]:
         encolar(c, "verificar_correo", {"contactoId": str(r["id"])})
     return r
+
+
+def verificar_correo(c: Conn, ident: str) -> dict[str, Any]:
+    """POST /contactos/:id/verificar-correo: vuelve a verificar el correo (DNS + Hunter).
+
+    El estado solo lo cambia el verificador; aquí no se marca nada a mano.
+    """
+    ct = obtener(c, "contactos", ident)
+    if not ct["correo"]:
+        raise HTTPException(400, "El contacto no tiene correo")
+    if ct["anonimizado_en"] or ct["excluido"]:
+        raise HTTPException(409, "El contacto está excluido o anonimizado")
+    encolar(
+        c,
+        "verificar_correo",
+        {"contactoId": str(ct["id"])},
+        f"verificar_correo:{ct['id']}:{uuid4()}",
+        3,
+    )
+    auditar(c, "verificar_correo", "contactos", str(ct["id"]))
+    return {"ok": True}
+
+
+def verificar_pendientes(c: Conn) -> int:
+    """Encola la verificación de los correos que nunca se pudieron verificar."""
+    filas = todos(
+        c,
+        "SELECT id FROM contactos WHERE correo IS NOT NULL AND estado_correo='desconocido' "
+        "AND anonimizado_en IS NULL AND NOT excluido",
+    )
+    for f in filas:
+        encolar(
+            c,
+            "verificar_correo",
+            {"contactoId": str(f["id"])},
+            f"verificar_correo:{f['id']}:{uuid4()}",
+            6,
+        )
+    return len(filas)
 
 
 def aprobar_legal(c: Conn, ident: str, admin: str) -> None:

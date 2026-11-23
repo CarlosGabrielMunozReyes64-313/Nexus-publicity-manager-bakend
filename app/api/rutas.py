@@ -279,6 +279,10 @@ def mutacion(
         and method == "POST"
     ):
         datos.aprobar_legal(c, str(ident), admin)
+    elif (
+        len(p) == 3 and recurso == "contactos" and action == "verificar-correo" and method == "POST"
+    ):
+        return datos.verificar_correo(c, str(ident))
     elif recurso == "duplicados" and ident and action == "resolver" and method == "POST":
         datos.fusionar(c, ident, body, admin)
     elif recurso == "duplicados" and ident and action == "descartar" and method == "POST":

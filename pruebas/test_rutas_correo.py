@@ -187,9 +187,9 @@ def test_pedir_ruta_valida_y_encola(auth, monkeypatch):
         assert r.status_code == 409 and r.json()["message"] == "El segmento requiere aprobación"
         r = auth.post("/api/propuestas/rutas-correo", json={**base, "segmentoId": sin_elegibles})
         assert r.status_code == 409
-        assert (
-            r.json()["message"]
-            == "El segmento no tiene contactos elegibles con base legal aprobada"
+        assert r.json()["message"] == (
+            "El segmento no tiene contactos elegibles: cada contacto necesita base legal "
+            "aprobada y un correo verificado como válido"
         )
 
         r = auth.post("/api/propuestas/rutas-correo", json={**base, "notas": "Mencionar Palmira"})

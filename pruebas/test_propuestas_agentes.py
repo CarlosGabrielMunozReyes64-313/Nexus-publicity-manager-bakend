@@ -10,6 +10,7 @@ from test_datos import auth  # noqa: F401
 
 from app.agentes.ejecutor import ClaudeFalso
 from app.agentes.tareas import correr
+from app.api import rutas_correo
 from app.config import config
 from app.db import insertar, transaccion, uno
 
@@ -233,4 +234,4 @@ def test_fallo_del_estratega_queda_visible(auth, monkeypatch):
     procesar(t)
     pedido = next(p for p in auth.get("/api/agentes/solicitudes").json() if p["id"] == tarea)
     assert pedido["estado"] == "fallida" and pedido["intentos"] == 1
-    assert pedido["error"] == "El segmento no tiene contactos elegibles con base legal aprobada"
+    assert pedido["error"] == rutas_correo.SIN_ELEGIBLES
