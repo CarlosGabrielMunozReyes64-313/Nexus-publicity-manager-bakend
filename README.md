@@ -75,7 +75,17 @@ Para desarrollar el frontend con Vite contra este backend, defina `APP_URL=http:
 
 ### Railway + Vercel
 
-`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **añade la migración `0004`** (solo datos: la versión 2 del prompt del Estratega-redactor para rutas de correo; no toca tablas, CHECK ni disparadores). En el servicio de Railway, en *Settings → Deploy → Pre-deploy command*, debe estar `alembic upgrade head` (con `DATABASE_URL` del propietario de las migraciones). Si no se aplica, la aplicación funciona igual con el prompt anterior; solo cambia cómo redacta el agente. En Railway, `APP_URL` debe ser el dominio público de Vercel de ese entorno. En Vercel, el destino del backend se define por entorno con `NEXUS_BACKEND_URL` (ver README del frontend); ya no hay una dirección fija en el repositorio.
+`Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`). Esta versión **añade la migración `0005`**, que es **obligatoria** antes de arrancar el código nuevo:
+
+- añade a `pasos` las columnas `formato` y `cuerpo_html` (con sus CHECK);
+- añade `secuencias.archivada_en` y `mensajes.cuerpo_html`;
+- duplica las secuencias compartidas por varias campañas;
+- crea la propuesta interna de cada campaña;
+- activa la versión 3 del prompt del Estratega-redactor.
+
+No debilita ningún CHECK ni disparador. Si `0004` aún no estaba aplicada, `alembic upgrade head` aplica las dos.
+
+En el servicio de Railway, en *Settings → Deploy → Pre-deploy command*, debe estar `alembic upgrade head` (con `DATABASE_URL` del propietario de las migraciones). La dependencia nueva `nh3` (limpieza del HTML de los correos con formato) se instala con el resto. En Railway, `APP_URL` debe ser el dominio público de Vercel de ese entorno. En Vercel, el destino del backend se define por entorno con `NEXUS_BACKEND_URL` (ver README del frontend); ya no hay una dirección fija en el repositorio.
 
 Después de actualizar, el receptor del formulario respeta el estado de la integración «Formulario». Si el secreto está configurado y nadie había tocado esa integración, el primer arranque la deja conectada para no cortar la captación; una desconexión explícita del administrador siempre se respeta.
 
@@ -240,6 +250,6 @@ Para el recorrido de navegador, instale Playwright (`npm install --no-save playw
 - `app/integraciones`: Gmail, Hunter, GA4 y Search Console; adaptadores falsos para pruebas.
 - `app/publico`: bajas, enlaces de seguimiento y formulario firmado.
 - `app/tareas`: cola PostgreSQL, programación y trabajador.
-- `migraciones`: original SQL, seguridad OAuth, prompts/contadores de agentes y (0004) el prompt v2 del Estratega-redactor para rutas de correo.
+- `migraciones`: original SQL, seguridad OAuth, prompts/contadores de agentes (0004) el prompt v2 del Estratega-redactor para rutas de correo y (0005) el editor de secuencias: formato HTML, archivo, una secuencia por campaña, propuesta interna por campaña y prompt v3.
 - El frontend está en su propia carpeta (`Nexus-publicity-manager-main`); Docker lo compila desde `FRONTEND_DIR`.
 - `pruebas`, `scripts`, `sql`: verificación, instalación y originales.

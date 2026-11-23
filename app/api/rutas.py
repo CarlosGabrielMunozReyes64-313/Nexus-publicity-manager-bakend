@@ -26,7 +26,13 @@ def leer(ruta: str, request: Request) -> Any:
     ident = parts[1] if len(parts) > 1 else None
     params = request.query_params
     with transaccion("admin", admin) as c:
-        if ruta == "panel/resumen":
+        if ruta == "secuencias/solicitudes":
+            from app.api.secuencias import solicitudes as solicitudes_ia
+
+            result = solicitudes_ia(c)
+        elif recurso == "secuencias" and ident != "solicitudes":
+            result = leer_secuencias(c, parts, params)
+        elif ruta == "panel/resumen":
             result = uno(c, "SELECT * FROM v_resumen_panel")
         elif recurso == "configuracion" and ident in ("marca", "limites", "cliente-ideal"):
             result = uno(
@@ -115,18 +121,69 @@ def leer(ruta: str, request: Request) -> Any:
         return serializar(result)
 
 
+def leer_secuencias(c: Any, parts: list[str], params: Mapping[str, str]) -> Any:
+    """GET /secuencias[/:id[/borrador|versiones|revision]]."""
+    from app.api import secuencias as sec
+
+    if len(parts) == 1:
+        return sec.lista(c, params)
+    ident, accion = parts[1], parts[2] if len(parts) > 2 else None
+    if accion is None:
+        return sec.detalle(c, ident)
+    if len(parts) == 3 and accion in (
+        "borrador",
+        "versiones",
+        "revision",
+        "elegibles",
+        "sugerencias",
+    ):
+        return getattr(sec, accion)(c, ident)
+    raise HTTPException(404, "Ruta no encontrada")
+
+
 @router.api_route("/{ruta:path}", methods=["POST", "PATCH", "PUT"])
 async def escribir(ruta: str, request: Request) -> Any:
     admin = administrador(request)
     try:
         raw = await request.body()
         body = await request.json() if raw else {}
+        partes = ruta.split("/")
+        if (
+            request.method == "POST"
+            and len(partes) == 3
+            and partes[0] == "secuencias"
+            and partes[2] == "aprobar-y-reanudar"
+        ):
+            # Dos transacciones: si reanudar falla (p. ej., Gmail desconectado), la
+            # aprobación ya quedó guardada y se responde 400 con el motivo.
+            from app.api import secuencias as sec
+
+            with transaccion("admin", admin, "post:secuencias") as c:
+                cam = sec.campana_de(c, partes[1])
+                if not cam or cam["estado"] != "activa":
+                    raise HTTPException(409, "Aprobar y reanudar solo aplica a una campaña activa")
+                sec.aprobar_secuencia(c, partes[1], admin)
+            with transaccion("admin", admin, "post:campanas") as c:
+                return serializar(sec.reanudar(c, partes[1], admin))
         with transaccion("admin", admin, request.method.lower() + ":" + ruta.split("/")[0]) as c:
             return serializar(mutacion(c, ruta, request.method, body, admin, request.query_params))
     except ValidationError as exc:
         raise HTTPException(400, "Datos no válidos; revise los campos enviados") from exc
     except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(400, "Solicitud incompleta o con formato no válido") from exc
+
+
+@router.delete("/{ruta:path}")
+def borrar(ruta: str, request: Request) -> Any:
+    """DELETE: por ahora solo descartar una sugerencia de «Mejorar con IA»."""
+    admin = administrador(request)
+    p = ruta.split("/")
+    if len(p) == 4 and p[0] == "secuencias" and p[2] == "sugerencias":
+        from app.api import secuencias as sec
+
+        with transaccion("admin", admin, "delete:secuencias") as c:
+            return serializar(sec.descartar_sugerencia(c, p[1], p[3]))
+    raise HTTPException(404, "Ruta no encontrada")
 
 
 def _verdadero(valor: Any) -> bool:
@@ -272,6 +329,22 @@ def mutacion(
         from app.integraciones.conexiones import cambiar
 
         return {"ok": True, **cambiar(c, ident, action)}
+    elif ruta == "secuencias/ia" and method == "POST":
+        from app.api.secuencias import pedir_ia
+
+        return pedir_ia(c, body)
+    elif (
+        recurso == "secuencias"
+        and ident == "solicitudes"
+        and len(p) == 4
+        and p[3] == "reintentar"
+        and method == "POST"
+    ):
+        from app.api.secuencias import reintentar_solicitud
+
+        return reintentar_solicitud(c, p[2])
+    elif recurso == "secuencias" and ident not in ("ia", "solicitudes"):
+        return escribir_secuencias(c, p, method, body, admin)
     elif ruta == "propuestas/rutas-correo" and method == "POST":
         from app.api.rutas_correo import pedir
 
@@ -309,3 +382,40 @@ def mutacion(
     else:
         raise HTTPException(404, "Ruta no encontrada")
     return {"ok": True}
+
+
+def escribir_secuencias(c: Any, p: list[str], method: str, body: Any, admin: str) -> Any:
+    """Mutaciones del editor de secuencias (cada una en la transacción de la petición)."""
+    from app.api import secuencias as sec
+
+    if len(p) == 1 and method == "POST":
+        return sec.nueva(c, body)
+    ident = p[1]
+    accion = p[2] if len(p) > 2 else None
+    cuerpo = body if isinstance(body, dict) else {}
+    if accion is None and method == "PUT":
+        # Compatibilidad con el frontend anterior: ahora guarda un borrador.
+        return sec.guardar_borrador(c, ident, body)
+    if accion == "borrador" and method == "PUT" and len(p) == 3:
+        return sec.guardar_borrador(c, ident, cuerpo.get("secuencia"))
+    if method != "POST":
+        raise HTTPException(404, "Ruta no encontrada")
+    if accion == "correos" and len(p) == 5 and p[4] == "mejorar":
+        return sec.mejorar(c, ident, p[3], cuerpo)
+    if accion == "versiones" and len(p) == 5 and p[4] == "restaurar":
+        try:
+            numero = int(p[3])
+        except ValueError as exc:
+            raise HTTPException(400, "Versión no válida") from exc
+        return sec.restaurar(c, ident, numero)
+    acciones = {
+        "previsualizar": lambda: sec.previsualizar(c, ident, cuerpo),
+        "aprobar": lambda: sec.aprobar_secuencia(c, ident, admin),
+        "prueba": lambda: sec.prueba(c, ident, cuerpo, admin),
+        "otra-version-ia": lambda: sec.otra_version_ia(c, ident, cuerpo, admin),
+        "duplicar": lambda: sec.duplicar(c, ident),
+        "archivar": lambda: sec.archivar(c, ident),
+    }
+    if len(p) == 3 and accion in acciones:
+        return acciones[accion]()
+    raise HTTPException(404, "Ruta no encontrada")

@@ -132,7 +132,7 @@ def secuencias(c: Conn, filas: list[Row]) -> list[Row]:
     if ids:
         for p in todos(
             c,
-            "SELECT secuencia_id,id,orden,asunto,cuerpo,espera_dias_habiles,mismo_hilo,variables FROM pasos WHERE secuencia_id=ANY(%s::uuid[]) ORDER BY orden",
+            "SELECT secuencia_id,id,orden,asunto,cuerpo,espera_dias_habiles,mismo_hilo,variables,formato,cuerpo_html FROM pasos WHERE secuencia_id=ANY(%s::uuid[]) ORDER BY orden",
             (ids,),
         ):
             pasos[str(p.pop("secuencia_id"))].append(p)

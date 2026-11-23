@@ -196,7 +196,7 @@ def test_pedir_ruta_valida_y_encola(auth, monkeypatch):
         assert r.status_code == 200 and r.json() == {"ok": True}
         r = auth.post("/api/propuestas/rutas-correo", json=base)
         assert r.status_code == 409
-        assert r.json()["message"] == "Ya hay una ruta en preparación para este segmento"
+        assert r.json()["message"] == "Ya hay una secuencia en preparación para este segmento"
 
         s = solicitud(auth, ultima_tarea())
         assert s["estado"] == "en_cola" and s["tipo"] == "proponer_campana"
@@ -249,7 +249,7 @@ def test_salida_invalida_dos_correcciones_y_falla_sin_reintentos(auth, agente):
         assert "corregir" in falso.entradas[1] and "Se pidieron 3 correos" in falso.entradas[2]
         s = solicitud(auth, tarea)
         assert s["estado"] == "fallida" and "terminadaEn" in s
-        assert s["error"] == "La ruta propuesta no cumple: Se pidieron 3 correos y la ruta tiene 2"
+        assert s["error"] == "La secuencia propuesta no cumple: Se pidieron 3 correos y la secuencia tiene 2"
         with transaccion("admin") as c:
             t = uno(c, "SELECT estado,intentos,max_intentos FROM tareas WHERE id=%s", (tarea,))
         assert t["estado"] == "fallida" and t["intentos"] == t["max_intentos"] == 1
@@ -408,15 +408,18 @@ def test_editar_contenido_crea_version_admin_y_conserva_notas(auth, agente):
         assert p["versionActual"] == 3 and p["resumen"] == "Resumen ajustado a mano"
         assert p["versiones"][-1]["contenido"] == v2["contenido"]
 
-        # Con la ruta ya aprobada, editar crea versión, revoca y vuelve a revisión.
+        # Con la ruta ya aprobada, editar crea un borrador: lo aprobado sigue vigente.
         assert auth.post(f"/api/propuestas/{p['id']}/aprobar", json={}).status_code == 200
         cam = p["objetivoCampanaId"]
-        assert auth.get(f"/api/campanas/{cam}").json()["estado"] == "aprobada"
+        antes = auth.get(f"/api/campanas/{cam}").json()
+        assert antes["estado"] == "aprobada"
         r = auth.put(f"/api/propuestas/{p['id']}", json={"contenido": contenido})
         assert r.status_code == 200
         p = auth.get(f"/api/propuestas/{p['id']}").json()
         assert p["estado"] == "pendiente" and p["versionActual"] == 4
-        assert auth.get(f"/api/campanas/{cam}").json()["estado"] == "en_revision"
+        despues = auth.get(f"/api/campanas/{cam}").json()
+        assert despues["estado"] == "aprobada"
+        assert despues["huellaAprobada"] == antes["huellaAprobada"]
     finally:
         cancelar_todo()
 
@@ -648,9 +651,11 @@ def test_migracion_0004_un_prompt_activo_y_bajada(auth):
                 ).fetchall()
             )
 
+    # En la cabeza (0005) el activo es el v3; la 0004 deja el v2 (se prueba al bajar).
     activos = [p for p in prompts() if p["activo"]]
-    assert len(activos) == 1 and activos[0]["version"] == 2
+    assert len(activos) == 1 and activos[0]["version"] == 3
     texto = activos[0]["texto"]
+    assert "texto simple" in texto and "reescribirCorreo" in texto
     for clave in (
         "RSE Express",
         "{{firma}}",
@@ -662,14 +667,14 @@ def test_migracion_0004_un_prompt_activo_y_bajada(auth):
 
     env = {**os.environ}
     alembic = [sys.executable, "-m", "alembic"]
-    subprocess.run([*alembic, "downgrade", "0003"], check=True, env=env, capture_output=True)
+    subprocess.run([*alembic, "downgrade", "0004"], check=True, env=env, capture_output=True)
     try:
-        activos = [p for p in prompts() if p["activo"]]
-        assert [p["version"] for p in activos] == [1]
+        assert [p["version"] for p in prompts() if p["activo"]] == [2]
+        subprocess.run([*alembic, "downgrade", "0003"], check=True, env=env, capture_output=True)
+        assert [p["version"] for p in prompts() if p["activo"]] == [1]
     finally:
         subprocess.run([*alembic, "upgrade", "head"], check=True, env=env, capture_output=True)
-    activos = [p for p in prompts() if p["activo"]]
-    assert [p["version"] for p in activos] == [2]
+    assert [p["version"] for p in prompts() if p["activo"]] == [3]
 
 
 # 12 -----------------------------------------------------------------------------------

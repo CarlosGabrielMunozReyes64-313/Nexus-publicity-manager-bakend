@@ -26,11 +26,16 @@ def test_aprobacion_versionado(auth):
     s['pasos'][0]['cuerpo']+=' Texto actualizado.'
     r=auth.put(f"/api/secuencias/{seq['id']}",json=s)
     assert r.status_code==200,r.text
-    r=auth.get(f"/api/campanas/{cam['id']}").json()
-    assert r['estado']=='en_revision' and 'huellaAprobada' not in r
+    # Guardar ahora crea un borrador: lo aprobado y vigente no cambia hasta aprobarlo.
+    antes=auth.get(f"/api/campanas/{cam['id']}").json()
+    assert antes['estado']=='aprobada' and len(antes['huellaAprobada'])==64
+    assert 'Texto actualizado' not in auth.get(f"/api/secuencias/{seq['id']}").json()['pasos'][0]['cuerpo']
     p=auth.get(f"/api/propuestas/{prop['id']}").json()
     assert p['estado']=='pendiente' and p['version']==2
     assert auth.post(f"/api/propuestas/{prop['id']}/aprobar",json={}).status_code==200
+    despues=auth.get(f"/api/campanas/{cam['id']}").json()
+    assert despues['estado']=='aprobada' and despues['huellaAprobada']!=antes['huellaAprobada']
+    assert 'Texto actualizado' in auth.get(f"/api/secuencias/{seq['id']}").json()['pasos'][0]['cuerpo']
     out=Path('pruebas/salidas/contratos.json')
     out.parent.mkdir(parents=True,exist_ok=True)
     records=json.loads(out.read_text()) if out.exists() else []

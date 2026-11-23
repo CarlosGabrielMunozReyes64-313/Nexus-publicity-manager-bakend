@@ -35,6 +35,7 @@ ESTADOS_SOLICITUD = {
 VARIABLES_DATOS = ("nombre", "empresa", "senal", "cargo", "municipio")
 SIN_ELEGIBLES = "El segmento no tiene contactos elegibles con base legal aprobada"
 SEGMENTO_SIN_APROBAR = "El segmento requiere aprobación"
+SECUENCIA_ARCHIVADA = "La secuencia está archivada"
 VENTANA_GLOBAL = (
     "La ventana de envío de la secuencia no coincide con el horario global "
     "(Configuración → Límites y horarios)"
@@ -228,7 +229,7 @@ def encolar_ruta(c: Conn, datos_tarea: dict[str, Any]) -> str:
         "AND datos->>'segmentoId'=%s",
         (list(EN_CURSO), str(seg["id"])),
     )["n"]:
-        raise HTTPException(409, "Ya hay una ruta en preparación para este segmento")
+        raise HTTPException(409, "Ya hay una secuencia en preparación para este segmento")
     from uuid import uuid4
 
     clave = f"proponer_campana:{seg['id']}:{uuid4()}"
@@ -243,11 +244,12 @@ def pedir(c: Conn, body: Any) -> dict[str, Any]:
     return {"ok": True}
 
 
-def solicitudes(c: Conn, dias: int = 30) -> list[Row]:
+def solicitudes(c: Conn, dias: int = 30, tipos: tuple[str, ...] = TIPOS_SOLICITUD) -> list[Row]:
     filas = todos(
         c,
         """SELECT t.id,t.tipo,t.estado,t.datos,t.ultimo_error,t.creada_en,t.terminada_en,
                   coalesce(t.datos->>'segmentoId', cam.segmento_id::text) AS segmento_id,
+                  coalesce(t.datos->>'secuenciaId', cam.secuencia_id::text) AS secuencia_id,
                   s.nombre AS segmento
            FROM tareas t
            LEFT JOIN propuestas p ON p.id::text = t.datos->>'propuestaId'
@@ -255,7 +257,7 @@ def solicitudes(c: Conn, dias: int = 30) -> list[Row]:
            LEFT JOIN segmentos s ON s.id::text = coalesce(t.datos->>'segmentoId', cam.segmento_id::text)
            WHERE t.tipo = ANY(%s) AND t.creada_en > now() - make_interval(days => %s)
            ORDER BY t.creada_en DESC""",
-        (list(TIPOS_SOLICITUD), dias),
+        (list(tipos), dias),
     )
     out = []
     for f in filas:
@@ -276,6 +278,7 @@ def solicitudes(c: Conn, dias: int = 30) -> list[Row]:
                 "segmento_id": f["segmento_id"],
                 "segmento": f["segmento"],
                 "propuesta_id": d.get("propuestaId"),
+                "secuencia_id": f["secuencia_id"],
                 "objetivo": d.get("objetivo")
                 or (OBJETIVO_POR_DEFECTO if f["tipo"] == "proponer_campana" else None),
                 "numero_correos": d.get("numeroCorreos"),
@@ -287,16 +290,26 @@ def solicitudes(c: Conn, dias: int = 30) -> list[Row]:
     return out
 
 
-def reintentar(c: Conn, tarea_id: str) -> dict[str, Any]:
+def reintentar(c: Conn, tarea_id: str, tipos: tuple[str, ...] = TIPOS_SOLICITUD) -> dict[str, Any]:
     t = obtener(c, "tareas", tarea_id, True)
-    if t["tipo"] not in TIPOS_SOLICITUD:
+    if t["tipo"] not in tipos:
         raise HTTPException(404, "Solicitud no encontrada")
     if ESTADOS_SOLICITUD.get(t["estado"]) != "fallida":
         raise HTTPException(409, "Solo se puede reintentar una solicitud fallida")
     d = {k: v for k, v in (t["datos"] or {}).items() if not k.startswith("_")}
     if t["tipo"] == "proponer_campana":
         d.pop("propuestaId", None)
+        d.pop("secuenciaId", None)
         encolar_ruta(c, d)
+    elif t["tipo"] == "reescribir_correo":
+        from uuid import uuid4
+
+        from app.agentes.solicitudes import proveedor_configurado
+
+        proveedor_configurado()
+        d.pop("resultado", None)
+        d.pop("descartada", None)
+        encolar(c, "reescribir_correo", d, f"reescribir_correo:{d.get('secuenciaId')}:{uuid4()}", 5)
     else:
         if uno(
             c,
@@ -436,6 +449,10 @@ def revision(c: Conn, p: Row, version: Row | None = None) -> dict[str, Any]:
         duracion = sum(x["esperaDiasHabiles"] for x in s["pasos"])
     if seg["estado"] != "aprobado":
         bloqueos.append(SEGMENTO_SIN_APROBAR)
+    if uno(c, "SELECT archivada_en FROM secuencias WHERE id=%s", (cam["secuencia_id"],))[
+        "archivada_en"
+    ]:
+        bloqueos.append(SECUENCIA_ARCHIVADA)
     ids = elegibles_ids(c, seg["reglas"])
     if s is not None and ids:
         usadas = {
@@ -487,7 +504,15 @@ def notas_editadas(anterior: Any, nueva: dict[str, Any]) -> dict[str, Any] | Non
         for n in notas.get("pasos", [])
         if isinstance(n, dict) and isinstance(n.get("orden"), int)
     }
-    claves = ("asunto", "cuerpo", "esperaDiasHabiles", "mismoHilo", "variables")
+    claves = (
+        "asunto",
+        "cuerpo",
+        "esperaDiasHabiles",
+        "mismoHilo",
+        "variables",
+        "formato",
+        "cuerpoHtml",
+    )
     pasos = []
     for i, paso in enumerate(nueva["pasos"], 1):
         antes = previa["pasos"][i - 1] if i <= len(previa["pasos"]) else None
@@ -562,12 +587,8 @@ def restaurar(c: Conn, p: Row, body: Any) -> Any:
     )
     if not v:
         raise HTTPException(404, "Versión no encontrada")
+    # Restaurar crea un borrador: lo aprobado sigue vigente hasta aprobar de nuevo.
     versionar(c, p, v["contenido"], autor="admin")
-    if p["tipo"] == "campana":
-        c.execute(
-            "SELECT revocar_aprobaciones(ARRAY[%s]::uuid[],%s)",
-            (p["objetivo_campana_id"], f"Se restauró la versión {numero}"),
-        )
     return {"ok": True, "version": p["version_actual"] + 1}
 
 

@@ -24,6 +24,7 @@ AGENTES = {
     "proponer_segmentos",
     "proponer_campana",
     "revisar_campana",
+    "reescribir_correo",
     "informe_semanal",
 }
 log = structlog.get_logger()
@@ -117,7 +118,12 @@ DEFINITIVOS = {
     "El segmento no tiene contactos elegibles con base legal aprobada",
 }
 # Prefijos de mensajes del validador de rutas (los motivos los escribe este backend).
-PREFIJOS_DEFINITIVOS = ("Secuencia no válida; requiere revisión", "La ruta propuesta no cumple:")
+PREFIJOS_DEFINITIVOS = (
+    "Secuencia no válida; requiere revisión",
+    "La ruta propuesta no cumple:",
+    "La secuencia propuesta no cumple:",
+    "La sugerencia no cumple:",
+)
 
 
 def sin_reintento(exc: Exception) -> bool:

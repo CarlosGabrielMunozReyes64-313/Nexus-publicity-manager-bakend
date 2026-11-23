@@ -199,6 +199,8 @@ def programar_inscripcion(c: Conn, ins: Row, now: datetime, gmail: Gmail, lim: R
         "destinatario": ct["correo"],
         "asunto": asunto,
         "cuerpo": rendered_step["cuerpo"],
+        # Texto con formato: el HTML personalizado se guarda para enviarlo como alternativa.
+        "cuerpo_html": rendered_step.get("cuerpoHtml") if step.get("formato") == "html" else None,
         "programado_para": target,
         "gmail_thread_id": hilo,
     }

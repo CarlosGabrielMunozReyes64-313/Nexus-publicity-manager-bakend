@@ -48,5 +48,25 @@ def test_todas_las_lecturas_con_datos(auth):
             res=auth.get('/api/propuestas/'+ruta['id']+'/'+suffix)
             assert res.status_code==200,(suffix,res.text)
             records.append({'ruta':'propuestas/'+ruta['id']+'/'+suffix,'schema':schema,'array':suffix=='elegibles','data':res.json()})
+    # Editor de secuencias: lista (también archivadas), solicitudes y lecturas por secuencia.
+    for path in ('secuencias?archivadas=true','secuencias/solicitudes'):
+        res=auth.get('/api/'+path)
+        assert res.status_code==200,(path,res.text)
+        records.append({'ruta':path,'schema':'secuencia' if path.startswith('secuencias?') else 'solicitudSecuencia','array':True,'data':res.json()})
+    ids=[x['id'] for x in auth.get('/api/secuencias').json()][:3]
+    with transaccion() as c:
+        con_sugerencias=uno(c,"SELECT datos->>'secuenciaId' AS id FROM tareas WHERE tipo='reescribir_correo' AND datos ? 'resultado' AND NOT (datos ? 'descartada') ORDER BY creada_en DESC LIMIT 1",(),False)
+    assert con_sugerencias, 'Se requiere una sugerencia de «Mejorar con IA» (la crean las pruebas del editor)'
+    ids.append(con_sugerencias['id'])
+    for ident in ids:
+        for suffix,schema,array in (('borrador','borrador',False),('versiones','versionSecuencia',True),('revision','revisionSecuencia',False),('elegibles','contactoElegible',True),('sugerencias','sugerencia',True)):
+            res=auth.get(f'/api/secuencias/{ident}/{suffix}')
+            assert res.status_code==200,(suffix,res.text)
+            records.append({'ruta':f'secuencias/{ident}/{suffix}','schema':schema,'array':array,'data':res.json()})
+            if suffix=='elegibles' and res.json():
+                previa=auth.post(f'/api/secuencias/{ident}/previsualizar',json={'contactoId':res.json()[0]['id']})
+                assert previa.status_code==200,previa.text
+                records.append({'ruta':f'secuencias/{ident}/previsualizar','schema':'vistaPrevia','array':False,'data':previa.json()})
+    assert any(r['schema']=='sugerencia' and r['data'] for r in records)
     out=Path('pruebas/salidas');out.mkdir(parents=True,exist_ok=True)
     (out/'contratos.json').write_text(json.dumps(records))

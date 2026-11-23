@@ -67,6 +67,9 @@ class Paso(Entrada):
     espera_dias_habiles: int
     mismo_hilo: bool
     variables: list[Variable] = Field(default_factory=list)
+    # «texto» (recomendado) o «html»; en «html», `cuerpo` es la versión en texto simple.
+    formato: Literal["texto", "html"] = "texto"
+    cuerpo_html: str | None = None
 
 
 class Secuencia(Entrada):

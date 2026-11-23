@@ -90,3 +90,59 @@ Sin migraciones nuevas: el despliegue en Railway no ejecuta `alembic upgrade`, a
 - **Migración 0004 (solo datos).** Desactiva la versión 1 del prompt (por el índice único de un prompt activo por agente) e inserta la versión 2 con el mismo texto de seguridad de 0003. La bajada reactiva la 1 y borra la 2 si ninguna ejecución la usó; si se usó, la conserva inactiva para no perder la auditoría, y una subida posterior la reactiva. No se debilitó ningún CHECK, disparador ni función: los 37 casos de `sql/nexus_publicity_manager_pruebas.sql` siguen pasando.
 - **Contrato aditivo.** Campos nuevos en camelCase (`autor`, `decision`, `comentario`, `decididaEn` en las versiones; `ruta` en la propuesta de tipo campana); los opcionales vacíos se omiten. `PUT /propuestas/:id` y `POST /propuestas/:id/restaurar` responden `{ok: true, version}`. El frontend anterior sigue funcionando con este backend.
 - **Despliegue.** Primero el backend (compatible con el frontend actual) y después el frontend. Railway debe ejecutar `alembic upgrade head` como comando previo al despliegue; sin 0004 todo funciona con el prompt anterior.
+
+## Secuencias de correo: editor con borrador, prueba y aprobación (22 de noviembre de 2026)
+
+Reemplaza la pantalla de Propuestas para las rutas de correo. Todo vive en «Secuencias de correo»: la IA propone la secuencia completa, el administrador la edita, la prueba y la aprueba. Aprobar no envía nada.
+
+- **Tres reglas que no cambian.**
+  1. Solo se envía lo aprobado: el motor lee `aprobaciones_campana.contenido_congelado`, como antes.
+  2. Guardar un borrador no cambia lo que se está enviando.
+  3. La IA propone y escribe, pero nunca aprueba, activa ni envía.
+- **Modelo.**
+  - Cada secuencia pertenece a una campaña, y esa campaña tiene una propuesta interna de tipo `campana`. Sus `propuesta_versiones` son el historial, y la última versión es el borrador.
+  - `secuencias` y `pasos` guardan lo último aprobado y solo cambian al aprobar.
+  - Guardar crea una versión (`autor: admin`), aunque tenga errores; esos errores impiden aprobar, no guardar.
+  - Un borrador idéntico al último y sin decidir no crea versión.
+  - Las comparaciones usan `Secuencia.model_validate(...).model_dump(by_alias=True, exclude_none=True)`.
+- **Cambio de comportamiento.** `PUT /propuestas/:id` con `contenido` y `PUT /secuencias/:id` ya no revocan la aprobación: crean un borrador. Antes, editar una secuencia activa la pausaba al instante. Ahora la campaña sigue enviando la versión aprobada hasta que se aprueban los cambios.
+- **Aprobar una campaña activa.**
+  - Aprobar sigue pausando sus envíos (es lo que hacen los disparadores al cambiar `pasos`).
+  - `POST /secuencias/:id/aprobar-y-reanudar` aprueba y reanuda en dos transacciones. Si reanudar falla (por ejemplo, con Gmail desconectado), la aprobación queda guardada y se responde 400 con el motivo.
+  - Una versión ya decidida no se vuelve a decidir: se aprueba una copia.
+- **`revisar_pendientes`.**
+  - Ya no crea versiones a partir de la secuencia en uso.
+  - Si la última versión estaba decidida (por ejemplo, aprobada y luego revocada por un cambio de marca o de segmento), crea una copia para aprobarla de nuevo.
+  - Nunca tapa un borrador más nuevo.
+- **Migración 0005** (la 0004 puede estar aplicada en producción):
+  - `pasos.formato` (`texto` o `html`, con CHECK);
+  - `pasos.cuerpo_html` con CHECK: nulo en texto; en html, entre 1 y 20.000 caracteres y con `{{baja}}` y `{{firma}}`;
+  - `secuencias.archivada_en` y `mensajes.cuerpo_html`;
+  - duplica las secuencias compartidas por varias campañas (la campaña más antigua conserva la original);
+  - crea la propuesta `campana` que falte (versión 1 = la secuencia en uso);
+  - prompt v3 del `estratega_redactor`: desactiva el anterior antes de insertar.
+  - La bajada reactiva v2, borra v3 si nadie la usó y quita las columnas.
+  - No se debilitó ningún CHECK, disparador ni función: los 37 casos originales pasan.
+- **Lecturas.**
+  - `GET /secuencias` añade, sin quitar nada: `campanaId`, `campanaEstado`, `segmentoId`, `estadoEditor`, `versionBorrador`, `versionAprobada`, `actualizadaEn` y `archivada`.
+  - `estadoEditor` toma el primer caso que se cumpla, en este orden: archivada → borrador (nunca aprobada) → `cambios_sin_aprobar` (el borrador difiere de lo congelado, o se revocó la aprobación) → el estado de la campaña.
+- **Revisión.** `GET /secuencias/:id/revision` devuelve `{puedeAprobar, bloqueos, errores, advertencias, elegibles, gmailConectado, duracionDiasHabiles, hayCambiosSinAprobar}` y algunos datos de apoyo. Aprobar usa exactamente esa lógica. Los errores se nombran «Correo N:», como en el editor.
+- **Envío de prueba** (`POST /secuencias/:id/prueba`):
+  - va solo al correo del administrador, con el asunto «[Prueba] …» y la cabecera `X-Nexus-Prueba`;
+  - el enlace de baja es «#» y no hay enlaces de seguimiento ni filas en `mensajes`;
+  - requiere Gmail conectada y admite máximo 20 al día (días de Bogotá), contados en `registro_auditoria` (`envio_prueba`), así que el límite sobrevive a reinicios.
+- **Texto con formato.**
+  - El HTML se limpia en el servidor con nh3 y una lista blanca: p, br, strong, em, ul, ol, li y a, con href solo `https:` o `{{enlace}}`.
+  - El texto simple se genera a partir del HTML limpio y se guarda en `pasos.cuerpo`, que conserva todas sus reglas.
+  - El motor guarda el HTML personalizado en `mensajes.cuerpo_html` y envía `multipart/alternative` (texto primero) con una plantilla mínima, sin imágenes ni píxel de apertura.
+  - Las variables se escapan siempre. `href="{{enlace}}"` y `{{enlace}}` suelto llevan el mismo enlace de seguimiento que el texto, y `{{baja}}` muestra el texto de baja con su enlace.
+  - La IA siempre escribe texto simple.
+- **«Mejorar con IA».**
+  - `POST /secuencias/:id/correos/:orden/mejorar` encola `reescribir_correo` con el texto del correo, el resto de la secuencia (sin notas) y la instrucción (3 a 300 caracteres). 409 si ya hay una en curso para ese correo.
+  - El agente recibe además cifras agregadas del segmento; nunca datos personales.
+  - La salida `{asunto?, cuerpo, porQue}` pasa las reglas de un correo: firma, baja, longitud, palabras prohibidas y variables conocidas. Se corrige hasta dos veces; si sigue sin cumplir, falla sin reintentos con «La sugerencia no cumple: …».
+  - La sugerencia queda en `tareas.datos.resultado` y no toca el borrador.
+  - `GET /secuencias/:id/sugerencias` la lista; `DELETE /secuencias/:id/sugerencias/:tareaId` la oculta y, si aún no empezó, la cancela.
+  - Se añadió DELETE al enrutador. Como toda mutación, exige `Content-Type: application/json` y el mismo origen.
+- **Archivar.** Una campaña activa no se archiva (409 «Pause la campaña antes de archivar la secuencia»). Una secuencia archivada no admite borradores ni aprobación.
+- **Despliegue.** Primero el backend y después el frontend. El comando previo al despliegue en Railway sigue siendo `alembic upgrade head`, que aplica 0005. La dependencia nueva `nh3` está en `pyproject.toml` y `requirements.lock`.

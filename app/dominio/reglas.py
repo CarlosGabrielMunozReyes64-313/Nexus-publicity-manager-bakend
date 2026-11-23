@@ -116,6 +116,17 @@ def validar_secuencia(s: dict[str, Any], prohibidas: list[str]) -> list[str]:
         errors.extend(
             "Palabra prohibida: " + w for w in prohibidas if w and w.lower() in p["cuerpo"].lower()
         )
+        if p.get("formato") == "html":
+            # `cuerpo` ya es la versión en texto simple (se valida arriba); aquí el HTML.
+            html = p.get("cuerpoHtml") or ""
+            if not html.strip():
+                errors.append(f"Paso {i + 1}: falta el texto con formato")
+            elif len(html) > 20000:
+                errors.append(f"Paso {i + 1}: el texto con formato admite hasta 20.000 caracteres")
+            else:
+                for var in ("baja", "firma"):
+                    if "{{" + var + "}}" not in html:
+                        errors.append(f"Paso {i + 1}: falta {{{{{var}}}}} en el texto con formato")
     return errors
 
 

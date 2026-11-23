@@ -20,7 +20,13 @@ from app.motor.plantillas import render
 
 
 def nueva_propuesta(
-    c: Conn, agente: str, tipo: str, resumen: str, contenido: Any, objetivo: Row | None = None
+    c: Conn,
+    agente: str,
+    tipo: str,
+    resumen: str,
+    contenido: Any,
+    objetivo: Row | None = None,
+    autor: str | None = None,
 ) -> Row:
     r = insertar(
         c, "propuestas", {"agente": agente, "tipo": tipo, "resumen": resumen, **(objetivo or {})}
@@ -32,7 +38,7 @@ def nueva_propuesta(
             "propuesta_id": r["id"],
             "version": 1,
             "contenido": Jsonb(serializar(contenido)),
-            "autor": "agente" if agente else "admin",
+            "autor": autor or ("agente" if agente else "admin"),
         },
     )
     return r
@@ -61,11 +67,17 @@ def versionar(
 
 
 def revisar_pendientes(c: Conn) -> None:
+    """Campañas que quedaron en revisión sin aprobación (cambió la marca o el segmento).
+
+    La secuencia en vivo ya no se edita fuera de la aprobación, así que nunca se crean
+    versiones a partir de ella: si la última versión ya estaba aprobada, se crea una copia
+    de esa misma versión para poder aprobarla otra vez. Un borrador sin decidir (más nuevo)
+    se deja tal cual: nunca se tapa con contenido viejo.
+    """
     for cam in todos(
         c,
         "SELECT * FROM campanas WHERE estado='en_revision' AND aprobacion_vigente_id IS NULL FOR UPDATE",
     ):
-        seq = serializar(lecturas.secuencia(c, obtener(c, "secuencias", str(cam["secuencia_id"]))))
         p = uno(
             c,
             "SELECT * FROM propuestas WHERE tipo='campana' AND objetivo_campana_id=%s ORDER BY creado_en DESC LIMIT 1 FOR UPDATE",
@@ -73,6 +85,9 @@ def revisar_pendientes(c: Conn) -> None:
             False,
         )
         if not p:
+            seq = serializar(
+                lecturas.secuencia(c, obtener(c, "secuencias", str(cam["secuencia_id"])))
+            )
             nueva_propuesta(
                 c,
                 "estratega_redactor",
@@ -80,31 +95,16 @@ def revisar_pendientes(c: Conn) -> None:
                 "Revisar campaña: " + cam["nombre"],
                 seq,
                 {"objetivo_campana_id": cam["id"]},
+                autor="admin",
             )
-        else:
-            from app.api.rutas_correo import normalizar, notas_editadas
-
-            last = uno(
-                c,
-                "SELECT contenido,creada_en FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
-                (p["id"], p["version_actual"]),
-            )
-            nueva = normalizar(seq)
-            notas = notas_editadas(last["contenido"], nueva) if nueva else None
-            contenido = {**seq, "notasAgente": notas} if notas else seq
-            if p["estado"] == "aprobada":
-                # Ruta ya aprobada y revocada (marca, segmento, secuencia): como antes, una
-                # versión nueva con la secuencia vigente, que es la aprobada o una posterior.
-                versionar(c, p, contenido)
-                continue
-            if normalizar(last["contenido"]) == nueva:
-                continue
-            # Solo una secuencia modificada DESPUÉS de la última versión la reemplaza; si
-            # no, gana la versión del administrador (o del agente): nunca se pisa con
-            # contenido más antiguo.
-            secuencia = obtener(c, "secuencias", str(cam["secuencia_id"]))
-            if secuencia["actualizado_en"] > last["creada_en"]:
-                versionar(c, p, contenido)
+            continue
+        last = uno(
+            c,
+            "SELECT contenido,decision FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
+            (p["id"], p["version_actual"]),
+        )
+        if last["decision"] == "aprobada":
+            versionar(c, p, last["contenido"], autor="admin")
 
 
 def guardar_secuencia(c: Conn, ident: str, body: Row, revisar: bool = True) -> None:
@@ -143,6 +143,8 @@ def guardar_secuencia(c: Conn, ident: str, body: Row, revisar: bool = True) -> N
                 "espera_dias_habiles": p["esperaDiasHabiles"],
                 "mismo_hilo": p["mismoHilo"],
                 "variables": Jsonb(p["variables"]),
+                "formato": p.get("formato", "texto"),
+                "cuerpo_html": p.get("cuerpoHtml") if p.get("formato") == "html" else None,
             },
         )
     if revisar:
@@ -277,8 +279,11 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
         ):
             raise HTTPException(400, "La mejora requiere objetivo, id y cambios estructurados")
         if x["objetivo"] == "secuencia":
-            current = serializar(lecturas.secuencia(c, obtener(c, "secuencias", x["id"])))
-            guardar_secuencia(c, x["id"], {**current, **x["cambios"]})
+            # Aplicar una mejora crea un borrador en la secuencia; lo aprobado no cambia.
+            from app.api import secuencias as sec
+
+            borrador = sec.borrador(c, str(x["id"]))["contenido"]
+            sec.guardar_borrador(c, str(x["id"]), {**borrador, **x["cambios"]})
         elif x["objetivo"] == "segmento":
             modificar(c, ["segmentos", x["id"]], "PATCH", x["cambios"], admin)
         else:
@@ -331,6 +336,30 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                 ident,
                 {"estado": "aprobado", "aprobado_por": admin, "aprobado_en": datos.ahora()},
             )
+            # La propuesta del agente para este segmento queda aprobada con él.
+            for prop in todos(
+                c,
+                "SELECT * FROM propuestas WHERE tipo='segmento' AND objetivo_segmento_id=%s "
+                "AND estado IN ('pendiente','editada') FOR UPDATE",
+                (ident,),
+            ):
+                v = uno(
+                    c,
+                    "SELECT id,decision FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
+                    (prop["id"], prop["version_actual"]),
+                )
+                if v["decision"] is None:
+                    actualizar(
+                        c,
+                        "propuesta_versiones",
+                        str(v["id"]),
+                        {
+                            "decision": "aprobada",
+                            "decidida_por": admin,
+                            "decidida_en": datos.ahora(),
+                        },
+                    )
+                actualizar(c, "propuestas", str(prop["id"]), {"estado": "aprobada"})
         elif ident and method == "PATCH" and not action:
             if body == {"estado": "archivado"}:
                 actualizar(c, "segmentos", ident, {"estado": "archivado"})
@@ -415,12 +444,9 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                     "SELECT contenido FROM propuesta_versiones WHERE propuesta_id=%s AND version=%s",
                     (ident, prop["version_actual"]),
                 )["contenido"]
+            # Un borrador nuevo no cambia lo que se envía: lo aprobado sigue vigente hasta
+            # que se apruebe la versión nueva.
             versionar(c, prop, contenido, resumen)
-            if prop["tipo"] == "campana":
-                c.execute(
-                    "SELECT revocar_aprobaciones(ARRAY[%s]::uuid[],%s)",
-                    (prop["objetivo_campana_id"], "Propuesta editada"),
-                )
             return {"ok": True, "version": prop["version_actual"] + 1}
         else:
             raise HTTPException(404, "Ruta no encontrada")

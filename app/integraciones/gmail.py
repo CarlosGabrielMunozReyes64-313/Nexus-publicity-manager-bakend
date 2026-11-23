@@ -7,6 +7,7 @@ from typing import Protocol
 from app.config import config
 from app.db import Conn, Row
 from app.integraciones.conexiones import gmail
+from app.motor.html import con_plantilla
 
 
 def message_id(clave: str) -> str:
@@ -27,6 +28,9 @@ def mime(m: Row, marca: Row, baja: str, previo: str | None = None) -> EmailMessa
         e["In-Reply-To"] = previo
         e["References"] = previo
     e.set_content(m["cuerpo"], charset="utf-8")
+    if m.get("cuerpo_html"):
+        # multipart/alternative: el texto simple primero y el HTML con la plantilla mínima.
+        e.add_alternative(con_plantilla(m["cuerpo_html"]), subtype="html", charset="utf-8")
     return e
 
 

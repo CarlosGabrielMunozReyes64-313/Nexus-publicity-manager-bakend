@@ -48,6 +48,14 @@ class CampanaPropuesta(BaseModel):
     notas: NotasAgente
 
 
+class CorreoReescrito(BaseModel):
+    """«Mejorar con IA»: un solo correo reescrito con la instrucción del administrador."""
+
+    asunto: str | None = None  # solo si es el primero o abre un hilo nuevo
+    cuerpo: str
+    porQue: str  # una frase sobre qué cambió
+
+
 class Clasificacion(BaseModel):
     clasificacion: Literal[
         "interesado",

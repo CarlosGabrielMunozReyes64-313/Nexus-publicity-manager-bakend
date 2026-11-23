@@ -14,6 +14,8 @@ const { chromium } = require('playwright');
    const body=await page.locator('body').innerText();
    if(body.includes('La API devolvió datos con un formato inesperado')||body.includes('No fue posible completar la solicitud')) errors.push('Error visible en '+path);
    if(!body.includes('NEXUS')) errors.push('La aplicación no abrió '+path);
+   // Propuestas ya no es una pantalla: lleva a Secuencias de correo.
+   if(path==='/propuestas' && new URL(page.url()).pathname!=='/secuencias') errors.push('/propuestas no llevó a /secuencias');
    console.log('Pantalla '+path+' cargada');
  }
  await page.goto(base+'/empresas');

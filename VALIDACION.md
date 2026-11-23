@@ -1,26 +1,54 @@
 # Validación ejecutada — 22 de noviembre de 2026
 
-Entorno: Python 3.12, PostgreSQL 16.15, Node 22.23.5, Chrome for Testing 153 con Playwright 1.65, sobre Linux.
+Entorno: Python 3.12, PostgreSQL 16, Node 22.23.5, Chrome for Testing 153 con Playwright, sobre Linux.
 
 | Comprobación | Resultado | Alcance |
 | --- | --- | --- |
-| SQL original, PostgreSQL 16 | 37/37 casos | `scripts/probar_esquema.py` sobre la migración 0001. |
-| Migración 0004 | Aprobada | Base nueva: `alembic upgrade head` deja un solo prompt activo de `estratega_redactor` (versión 2); `alembic downgrade 0003` reactiva la versión 1 y `upgrade head` vuelve a la 2 (también en `pruebas/test_rutas_correo.py`). |
-| pytest, PostgreSQL 16 real | 109 pruebas aprobadas | 15 nuevas de rutas de correo en `pruebas/test_rutas_correo.py` (pedir con validaciones; tarea con Claude falso que crea secuencia, campaña `en_revision` y propuesta con notas; salida inválida con dos correcciones y fallo sin reintentos; 429 reintentado; segmento revocado sin gasto; entrada del agente sin nombres, correos, teléfonos ni ids; `PUT` con contenido; ediciones que sobreviven a cambios de marca y segmento; vista previa por versión sin mensajes; revisión y aprobar coinciden; aprobar una versión editada sin mensajes; rechazar con y sin versión nueva, restaurar y reintentar; migración 0004; ruta anterior de segmentos; contrato sin nulos). Las 94 anteriores siguen pasando: 48 existentes (algunas actualizadas al nuevo comportamiento), 18 de regresión en `pruebas/test_correcciones.py`, 3 de propuestas a pedido en `pruebas/test_propuestas_agentes.py` (validaciones, segmento y campaña de punta a punta, fallo visible), 9 de Descubrimiento con Tavily en `pruebas/test_buscador.py` (consultas, filtrado, errores, flujo completo, prueba de conexión) y 16 nuevas de proveedores en `pruebas/test_gemini.py` (Gemini: límite por minuto, cuotas, plan sin búsqueda, reintento sin chocar con el tope, prueba de conexión; Claude: errores clasificados, búsqueda web fallida, prueba de conexión). Base temporal con todas las migraciones; proveedores falsos. |
-| Contrato frontend/backend | 42 respuestas aprobadas por Zod | JSON real guardado por pytest, incluidas `propuestas/solicitudes`, `propuestas/rutas-correo/segmentos`, `propuestas/:id/revision` y `propuestas/:id/elegibles`; además, las 54 versiones reales de rutas cumplen `rutaCorreoSchema`. |
-| Compatibilidad con el frontend anterior | Aprobada | Los esquemas Zod del frontend entregado antes aceptan las 34 respuestas de este backend que ese frontend usa (las 8 restantes son rutas nuevas). Por eso el backend se puede desplegar primero. |
-| Pruebas del frontend | 76 aprobadas, 8 archivos | Vitest + Testing Library; 19 nuevas de rutas de correo (ver VALIDACION del frontend). |
-| Escenario completo de rutas (9 pasos) | Aprobado | Chrome con Playwright sobre la compilación de demostración: pedir, verla lista, vista previa, editar el correo 2, comparar 1 con 2, rechazar, recibir la versión 3 del agente, aprobar y comprobar la campaña aprobada sin ninguna llamada de inscripción, activación ni envío. |
-| Ruff, formato y mypy estricto | Aprobados | `app/` (48 archivos), la migración 0004 y las pruebas nuevas. |
-| ESLint, Prettier y TypeScript + Vite | Aprobados | Compilación con `VITE_USE_MOCKS=false`. |
-| Recorrido de navegador (13 pantallas) | Aprobado | `scripts/prueba_navegador.py` con la API real, el frontend compilado y Chrome. |
-| Recorrido de las correcciones en navegador | Aprobado | Script temporal de Playwright contra la API real (no incluido): sesión caída frente a vencida, importación CSV con cambio de empresa y resumen, integraciones con la dirección real del webhook, costo con fecha, embudo por periodo, auditoría filtrada y exportada, baja inválida. |
-| Arranque desde los ZIP | Aprobado | `scripts/probar_arranque.py` con los ZIP entregados: extracción limpia (sin `.env` previo), detección del frontend, `docker compose config`, pytest (94), `npm ci`, `npm test` (57), compilación, migraciones, API y aplicación. |
-| Docker | Parcial | Rutas y contextos verificados con `docker compose config` y una construcción BuildKit de las mismas instrucciones COPY. La descarga de imágenes base de Docker Hub estaba bloqueada en este entorno, por lo que no se construyó la imagen completa. |
-| Proveedores reales | No ejecutado | Sin credenciales reales ni envíos (Google, Gmail, Claude, Gemini, Tavily, Hunter). Las llamadas a Tavily siguen su documentación oficial, pero no se hicieron contra el servicio real. |
+| SQL original, PostgreSQL 16 | 37/37 casos | `scripts/probar_esquema.py` sobre la migración 0001, en una base aparte. |
+| Migraciones 0004 y 0005 | Aprobadas | En una base limpia: `upgrade head`, `downgrade 0004`, `downgrade 0003` y otra vez `upgrade head`, sin errores. Al final queda un solo prompt activo de `estratega_redactor` (v3). `pruebas/test_secuencias_editor.py` comprueba además que 0005 duplica las secuencias compartidas, crea las propuestas que faltan y baja bien. |
+| pytest, PostgreSQL 16 real | 122 aprobadas | 13 en `pruebas/test_secuencias_editor.py`, una por cada regla del editor (ver la nota bajo la tabla). Las anteriores se actualizaron a la regla nueva: guardar no revoca y el prompt v3 está en head. |
+| Contrato frontend/backend | 68 respuestas aprobadas por Zod | JSON real guardado por pytest. Incluye 28 respuestas de las rutas del editor: lista (también archivadas), solicitudes, borrador, versiones, revisión, elegibles, sugerencias y vista previa. |
+| Compatibilidad con el frontend anterior | Aprobada | Los esquemas Zod del frontend entregado antes aceptan las 42 respuestas de este backend que ese frontend usa; las otras 26 son de rutas nuevas. Por eso el backend se puede desplegar primero. |
+| Recorrido de 9 pasos en Chrome con la API real | Aprobado | Base nueva migrada a head, API real y trabajador real. Solo la IA y Gmail son simulados (script temporal, no incluido). Detalle de los pasos bajo la tabla. |
+| Recorrido de navegador (13 pantallas) | Aprobado | `scripts/prueba_navegador.py` con la API real; ahora comprueba también que `/propuestas` lleva a `/secuencias`. |
+| Pruebas del frontend | 94 aprobadas, 10 archivos | Ver VALIDACION del frontend. |
+| Ruff, formato y mypy estricto | Aprobados | `app/` (50 archivos) y las pruebas nuevas. |
+| Arranque desde los ZIP | Aprobado | `scripts/probar_arranque.py` con los ZIP entregados: extracción limpia, `docker compose config`, pytest (122), `npm ci`, `npm test`, compilación, migraciones, API y aplicación. |
+| Docker | Parcial | `docker compose config` sí; las imágenes base de Docker Hub no se pueden descargar en este entorno. |
+| Proveedores reales | No ejecutado | Sin credenciales reales ni envíos (Google, Gmail, Claude, Gemini, Tavily, Hunter). |
 
-Las pruebas no prueban entrega real de correo ni la exactitud comercial de un modelo. Antes de producción, conecte las integraciones con cuentas de prueba y ejecute `npm run verificar:despliegue` del frontend contra cada entorno.
+**Qué cubren las 13 pruebas de `pruebas/test_secuencias_editor.py`:**
+
+1. Un borrador de una secuencia activa no cambia los envíos.
+2. Un borrador con errores se guarda, pero no se puede aprobar.
+3. Aprobar copia la versión, congela el contenido y no crea mensajes.
+4. Aprobar y reanudar funciona con y sin Gmail.
+5. Los cambios de marca y de segmento no tapan un borrador.
+6. Vista previa sin guardar y envío de prueba (solo al administrador, sin mensajes, con el límite diario).
+7. Crear, duplicar, archivar y restaurar.
+8. Pedir otra versión a la IA.
+9. Migración 0005.
+10. Una mejora crea un borrador, y aprobar un segmento aprueba su propuesta.
+11. Solicitudes a la IA desde Secuencias.
+12. Texto con formato: limpieza, texto derivado, restricciones de la base y envío `multipart/alternative` por el motor, con el mismo enlace de seguimiento en las dos partes.
+13. «Mejorar con IA»: sin datos personales, sin tocar el borrador, asunto solo cuando corresponde, descartar, fallo sin reintentos y reintento.
+
+**Pasos del recorrido en Chrome:**
+
+1. Pedir la secuencia a la IA.
+2. Abrir el borrador.
+3. Editar el correo 2 y guardar con Ctrl+S. Pedir «Mejorar con IA» y descartar la sugerencia.
+4. Vista previa con un contacto real.
+5. Enviar una prueba.
+6. Aprobar, comprobando el texto «Aprobar no envía ningún correo…».
+7. Inscribir y activar la campaña.
+8. Editar otra vez (con el correo 3 en formato): la API sigue sirviendo el texto aprobado y las inscripciones siguen activas.
+9. Aprobar y reanudar: contenido nuevo, campaña activa y HTML limpio.
+
+Al final se comprobó el Historial y el editor y la lista a 390 px, sin desborde horizontal. No hubo errores en la consola ni respuestas 5xx.
+
+Las pruebas no prueban la entrega real de correo ni la exactitud comercial de un modelo. Antes de producción, conecte las integraciones con cuentas de prueba y ejecute `npm run verificar:despliegue` del frontend contra cada entorno.
 
 ## Evidencia reproducible
 
-`pruebas/salidas/contratos.json` (generado por pytest). Las instrucciones de ejecución están en README.md; los límites conocidos en DECISIONES.md.
+`pruebas/salidas/contratos.json` (generado por pytest). Las instrucciones de ejecución están en README.md y los límites conocidos en DECISIONES.md.

@@ -1,3 +1,4 @@
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -8,6 +9,7 @@ from app.agentes.ejecutor import Claude, ejecutar
 from app.agentes.modelos import (
     CampanaPropuesta,
     Clasificacion,
+    CorreoReescrito,
     Descubrimiento,
     Enriquecimiento,
     Informe,
@@ -48,6 +50,42 @@ def fuentes(datos_extraidos: list[Any], dominio: str | None = None) -> list[Row]
             }
         )
     return result
+
+
+VARIABLES_CONOCIDAS = {
+    "nombre",
+    "empresa",
+    "senal",
+    "cargo",
+    "municipio",
+    "enlace",
+    "firma",
+    "baja",
+}
+
+
+def problemas_de_correo(r: Any, lleva_asunto: bool, prohibidas: list[str]) -> list[str]:
+    """Las reglas de un correo (las de validar_secuencia) para una sugerencia suelta."""
+    errores = []
+    cuerpo = r.cuerpo or ""
+    if lleva_asunto and r.asunto is not None and not r.asunto.strip():
+        errores.append("El asunto no puede quedar vacío")
+    if r.asunto and len(r.asunto) > 200:
+        errores.append("El asunto admite hasta 200 caracteres")
+    for var in ("firma", "baja"):
+        if "{{" + var + "}}" not in cuerpo:
+            errores.append(f"Falta {{{{{var}}}}}")
+    if not 30 <= len(cuerpo) <= 3000:
+        errores.append("El cuerpo debe tener entre 30 y 3000 caracteres")
+    texto = (cuerpo + " " + (r.asunto or "")).lower()
+    errores.extend("Palabra prohibida: " + w for w in prohibidas if w and w.lower() in texto)
+    desconocidas = sorted(
+        set(re.findall(r"\{\{(\w+)\}\}", cuerpo + (r.asunto or ""))) - VARIABLES_CONOCIDAS
+    )
+    errores.extend(f"Variable desconocida: {{{{{v}}}}}" for v in desconocidas)
+    if not r.porQue.strip():
+        errores.append("Falta porQue")
+    return errores
 
 
 def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = None) -> None:
@@ -111,12 +149,44 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     if isinstance(rechazada["contenido"], dict)
                     else None
                 )
-                entrada["comentario"] = rechazada["comentario"]
+                entrada["comentario"] = payload.get("comentario") or rechazada["comentario"]
                 entrada["comentariosAnteriores"] = [
                     x
                     for x in rutas_correo.comentarios_rechazo(c, str(prop["id"]))
                     if x != rechazada["comentario"]
                 ]
+        elif tipo == "reescribir_correo":
+            from app.api import rutas_correo
+
+            # Solo el texto del correo (con sus variables) y cifras agregadas del segmento:
+            # ningún dato personal de los contactos.
+            seg = obtener(c, "segmentos", payload["segmentoId"])
+            contexto = payload.get("contexto") or {}
+            orden = int(payload["orden"])
+            original = payload["original"]
+            entrada = rutas_correo.entrada_agente(
+                c,
+                seg,
+                {
+                    "objetivo": contexto.get("objetivo") or rutas_correo.OBJETIVO_POR_DEFECTO,
+                    "numeroCorreos": len(contexto.get("pasos") or []) or 1,
+                },
+            )
+            entrada["secuencia"] = {
+                "objetivo": contexto.get("objetivo"),
+                "llamadaAccion": contexto.get("llamadaAccion"),
+                "correos": [
+                    {k: p.get(k) for k in ("orden", "asunto", "cuerpo", "mismoHilo") if p.get(k)}
+                    for p in contexto.get("pasos") or []
+                ],
+            }
+            entrada["reescribirCorreo"] = {
+                "orden": orden,
+                "llevaAsunto": bool(original.get("llevaAsunto")),
+                "asunto": original.get("asunto"),
+                "cuerpo": original["cuerpo"],
+                "instruccion": payload["instruccion"],
+            }
         elif tipo == "proponer_segmentos":
             entrada = {
                 "empresas": serializar(
@@ -197,7 +267,7 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
             errores = validar_secuencia(s, marca["prohibidas"])
             if numero_correos and len(s["pasos"]) != numero_correos:
                 errores.append(
-                    f"Se pidieron {numero_correos} correos y la ruta tiene {len(s['pasos'])}"
+                    f"Se pidieron {numero_correos} correos y la secuencia tiene {len(s['pasos'])}"
                 )
             return errores
 
@@ -220,7 +290,27 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
             )
             errors = problemas(result)
         if errors:
-            raise ValueError("La ruta propuesta no cumple: " + ". ".join(errors))
+            raise ValueError("La secuencia propuesta no cumple: " + ". ".join(errors))
+    elif tipo == "reescribir_correo":
+        lleva_asunto = bool(payload["original"].get("llevaAsunto"))
+
+        def problemas_correo(r: CorreoReescrito) -> list[str]:
+            return problemas_de_correo(r, lleva_asunto, marca["prohibidas"])
+
+        result = ejecutar("estratega_redactor", entrada, CorreoReescrito, proveedor)
+        errors = problemas_correo(result)
+        for _ in range(2):
+            if not errors:
+                break
+            result = ejecutar(
+                "estratega_redactor",
+                {"entrada": entrada, "correoAnterior": result.model_dump(), "corregir": errors},
+                CorreoReescrito,
+                proveedor,
+            )
+            errors = problemas_correo(result)
+        if errors:
+            raise ValueError("La sugerencia no cumple: " + ". ".join(errors))
     elif tipo == "proponer_segmentos":
         result = ejecutar("segmentador", entrada, SegmentoPropuesto, proveedor)
         reglas_validas(result.reglas)
@@ -230,7 +320,7 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
         "investigador"
         if tipo in ("enriquecer_empresa", "descubrir_empresas")
         else "estratega_redactor"
-        if tipo in ("proponer_campana", "revisar_campana")
+        if tipo in ("proponer_campana", "revisar_campana", "reescribir_correo")
         else "segmentador"
         if tipo == "proponer_segmentos"
         else "analista"
@@ -343,11 +433,27 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     )
         elif tipo in ("proponer_campana", "revisar_campana"):
             s = result.secuencia.model_dump(by_alias=True, exclude_none=True)
+            # El agente siempre escribe texto simple; el formato HTML lo elige el administrador.
+            for paso in s["pasos"]:
+                paso["formato"] = "texto"
+                paso.pop("cuerpoHtml", None)
             notas = result.notas.model_dump()
             if tipo == "revisar_campana":
-                # El agente solo crea una versión de la propuesta; nunca edita la campaña.
+                # El agente solo crea una versión (un borrador); nunca edita lo aprobado.
                 prop = obtener(c, "propuestas", payload["propuestaId"], True)
-                versionar(c, prop, {**s, "notasAgente": notas}, result.resumen, autor="agente")
+                cam_rev = obtener(c, "campanas", str(prop["objetivo_campana_id"]))
+                versionar(
+                    c,
+                    prop,
+                    {**s, "id": str(cam_rev["secuencia_id"]), "notasAgente": notas},
+                    result.resumen,
+                    autor="agente",
+                )
+                c.execute(
+                    "UPDATE tareas SET datos=datos||jsonb_build_object('secuenciaId',%s::text) "
+                    "WHERE id=%s",
+                    (str(cam_rev["secuencia_id"]), tarea_id),
+                )
             else:
                 seq = insertar(
                     c,
@@ -399,12 +505,24 @@ def _correr(tipo: str, payload: Row, tarea_id: str, proveedor: Claude | None = N
                     },
                     {"objetivo_campana_id": cam["id"]},
                 )
-                # Así la lista de solicitudes enlaza con la ruta creada.
+                # Así la lista de solicitudes enlaza con la secuencia creada.
                 c.execute(
-                    "UPDATE tareas SET datos=datos||jsonb_build_object('propuestaId',%s::text) "
-                    "WHERE id=%s",
-                    (str(creada["id"]), tarea_id),
+                    "UPDATE tareas SET datos=datos||jsonb_build_object('propuestaId',%s::text,"
+                    "'secuenciaId',%s::text) WHERE id=%s",
+                    (str(creada["id"]), str(seq["id"]), tarea_id),
                 )
+        elif tipo == "reescribir_correo":
+            # Solo una sugerencia: el administrador decide si la usa en su borrador.
+            sugerencia = {"cuerpo": result.cuerpo.strip(), "porQue": result.porQue.strip()}
+            if lleva_asunto:
+                sugerencia["asunto"] = (result.asunto or "").strip() or payload["original"].get(
+                    "asunto"
+                )
+            c.execute(
+                "UPDATE tareas SET datos=datos||jsonb_build_object('resultado',%s::jsonb) "
+                "WHERE id=%s",
+                (Jsonb(sugerencia), tarea_id),
+            )
         elif tipo == "proponer_segmentos":
             seg = insertar(
                 c,
