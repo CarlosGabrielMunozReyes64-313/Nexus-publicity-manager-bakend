@@ -27,7 +27,7 @@ from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
 from app.dominio.reglas import BOGOTA
 from app.integraciones.conexiones import pausar_todo
-from app.tareas.bitacora import RUTINARIAS, describir, evento, latido
+from app.tareas.bitacora import RUTINARIAS, corto, describir, evento, latido
 from app.tareas.bitacora import hora as hora_bogota
 from app.tareas.programador import programar
 
@@ -204,9 +204,29 @@ def sin_reintento(exc: Exception) -> bool:
     )
 
 
-def detalle_seguro(exc: Exception) -> str:
+# Servicio de Google de cada tarea, para explicar sus errores.
+SERVICIOS_GOOGLE = {
+    "sincronizar_gmail": "Gmail",
+    "enviar_mensaje": "Gmail",
+    "programar_envios": "Gmail",
+    "sincronizar_ga4": "Google Analytics",
+    "sincronizar_search_console": "Search Console",
+}
+# Fallos seguidos de «Revisar respuestas en Gmail» antes de pausar los envíos: sin leer las
+# respuestas no se ven las bajas pedidas por correo.
+FALLOS_GMAIL_PARA_PAUSAR = 3
+# Un mismo fallo de una tarea rutinaria se anota una vez cada tanto, no cada minuto.
+REPETICION_RUTINARIA = "10 minutes"
+
+
+def detalle_seguro(exc: Exception, tipo: str | None = None) -> str:
     import re
 
+    from app.integraciones.errores_google import explicar
+
+    google = explicar(exc, SERVICIOS_GOOGLE.get(tipo or "", "Google"))
+    if google:
+        return google
     if isinstance(exc, FalloProveedor):
         # Siempre se arma con textos fijos del backend (sin claves ni contenido externo).
         return str(exc)
@@ -247,7 +267,21 @@ def detalle_seguro(exc: Exception) -> str:
         )
     ):
         return texto
-    return "Error no clasificado; requiere diagnóstico adicional"
+    # El nombre de la clase no lleva datos y orienta el diagnóstico (p. ej. KeyError).
+    return f"Error no clasificado ({type(exc).__name__}); requiere diagnóstico adicional"
+
+
+def gmail_falla_seguido(c: db.Conn) -> bool:
+    """¿Fallaron las últimas revisiones de Gmail seguidas (incluida la actual)?"""
+    ultimas = db.todos(
+        c,
+        "SELECT estado FROM tareas WHERE tipo='sincronizar_gmail' "
+        "AND estado IN ('completada','fallida') ORDER BY terminada_en DESC LIMIT %s",
+        (FALLOS_GMAIL_PARA_PAUSAR,),
+    )
+    return len(ultimas) == FALLOS_GMAIL_PARA_PAUSAR and all(
+        r["estado"] == "fallida" for r in ultimas
+    )
 
 
 def anotar_inicio(t: db.Row) -> None:
@@ -286,9 +320,12 @@ def procesar(t: db.Row) -> None:
     except Exception as exc:
         # Do not log provider payloads, addresses, credentials or email bodies.
         log.warning(
-            "tarea_fallida", tipo=t["tipo"], clase=type(exc).__name__, detalle=detalle_seguro(exc)
+            "tarea_fallida",
+            tipo=t["tipo"],
+            clase=type(exc).__name__,
+            detalle=detalle_seguro(exc, t["tipo"]),
         )
-        motivo = detalle_seguro(exc)
+        motivo = detalle_seguro(exc, t["tipo"])
         with transaccion("proceso:trabajador") as c:
             descripcion = describir(c, t)
             if t["tipo"] in AGENTES and motivo in CUOTAS_DIARIAS:
@@ -315,18 +352,12 @@ def procesar(t: db.Row) -> None:
                     "WHERE id=%s",
                     (INTENTOS_NORMALES, t["id"]),
                 )
-            if t["tipo"] in AGENTES and sin_reintento(exc):
+            if (t["tipo"] in AGENTES and sin_reintento(exc)) or t["tipo"] in RUTINARIAS:
+                # Las rutinarias se repiten solas cada 1 o 2 minutos: esa es su reintento.
                 c.execute("UPDATE tareas SET max_intentos=intentos WHERE id=%s", (t["id"],))
-            state = uno(
-                c,
-                "SELECT terminar_tarea(%s,false,%s) AS estado",
-                (
-                    t["id"],
-                    motivo
-                    if motivo != "Error no clasificado; requiere diagnóstico adicional"
-                    else "La tarea no pudo completarse; revise integración y datos",
-                ),
-            )["estado"]
+            state = uno(c, "SELECT terminar_tarea(%s,false,%s) AS estado", (t["id"], motivo))[
+                "estado"
+            ]
             if saturado and state == "reprogramada":
                 espera = ESPERAS_SATURACION_MIN[
                     min(int(t["intentos"]), len(ESPERAS_SATURACION_MIN)) - 1
@@ -348,7 +379,13 @@ def procesar(t: db.Row) -> None:
                     "aviso",
                     t["id"],
                 )
-            else:
+            elif t["tipo"] not in RUTINARIAS or not uno(
+                c,
+                "SELECT 1 AS si FROM eventos_trabajador WHERE mensaje=%s "
+                f"AND creado_en > now() - interval '{REPETICION_RUTINARIA}' LIMIT 1",
+                (corto(f"{descripcion}: falló. {motivo}.", 500),),
+                False,
+            ):
                 evento(c, f"{descripcion}: falló. {motivo}.", "error", t["id"])
             auth_error = (
                 isinstance(exc, RefreshError)
@@ -368,10 +405,20 @@ def procesar(t: db.Row) -> None:
                 )
                 pausar_todo(c, "Gmail requiere renovar autorización")
             if state == "fallida":
-                if t["tipo"] in ("enviar_mensaje", "sincronizar_gmail"):
-                    pausar_todo(
-                        c, "Se agotaron los intentos de una tarea de Gmail; revise auditoría"
-                    )
+                if t["tipo"] == "enviar_mensaje" or (
+                    t["tipo"] == "sincronizar_gmail" and gmail_falla_seguido(c)
+                ):
+                    if uno(
+                        c, "SELECT 1 AS si FROM campanas WHERE estado='activa' LIMIT 1", (), False
+                    ):
+                        evento(
+                            c,
+                            "Campañas activas en pausa: Gmail falla. "
+                            f"{motivo}. Reanúdelas cuando se resuelva.",
+                            "error",
+                            t["id"],
+                        )
+                    pausar_todo(c, f"Envíos en pausa: {motivo}")
                 if t["tipo"] == "descubrir_empresas":
                     actualizar(
                         c,

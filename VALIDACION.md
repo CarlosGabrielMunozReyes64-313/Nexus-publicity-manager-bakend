@@ -1,5 +1,12 @@
 # Validación ejecutada — 22 de noviembre de 2026
 
+**Actualización del 23 de noviembre de 2026 (errores de Google y Gmail):** pytest 144 aprobadas. `pruebas/test_errores_google.py` (11) comprueba:
+- la explicación de cada tipo de error de Google, sin repetir el texto de Google;
+- que una API de Gmail deshabilitada se dice en la tarea, con un solo intento por revisión y una sola línea en la Terminal aunque se repita;
+- que la pausa con motivo llega al tercer fallo seguido;
+- que un error desconocido dice su clase;
+- que «Probar conexión» explica el error.
+
 **Actualización del 23 de noviembre de 2026 (meta diaria y Terminal, migración 0007):** pytest 133 aprobadas. `pruebas/test_meta_terminal.py` (6) comprueba:
 - la validación y el guardado de la meta, con auditoría;
 - una búsqueda a la vez, un tipo y un municipio por búsqueda, rotación y tope del día;

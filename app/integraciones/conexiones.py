@@ -239,11 +239,15 @@ def cambiar(c: Conn, ident: str, accion: str) -> dict[str, str]:
     except HTTPException:
         raise
     except Exception as exc:
+        from app.integraciones.errores_google import explicar
+
+        servicio = {"gmail": "Gmail", "ga4": "Google Analytics", "search_console": "Search Console"}
         # Los ValueError son mensajes propios (nunca contienen secretos).
         detalle = (
             str(exc)
             if isinstance(exc, ValueError)
-            else "No se pudo comprobar la conexión. Revise credenciales, permisos y disponibilidad del proveedor."
+            else explicar(exc, servicio.get(ident, "Google"))
+            or "No se pudo comprobar la conexión. Revise credenciales, permisos y disponibilidad del proveedor."
         )
         actualizar(c, "integraciones", ident, {"estado": "error", "detalle": detalle})
         return {"estado": "error", "detalle": detalle}
