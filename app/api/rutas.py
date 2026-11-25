@@ -12,20 +12,24 @@ from app.db import actualizar, encolar, obtener, todos, transaccion, uno
 from app.dominio.reglas import ventanas_compatibles
 from app.esquemas.entradas import Limites, Marca
 from app.esquemas.serializar import serializar
-from app.seguridad.auth import administrador
+from app.seguridad.auth import SIN_PERMISO, administrador, cuenta_actual
+from app.seguridad.permisos import puede_leer
 
 router = APIRouter(prefix="/api")
 
 
 @router.get("/{ruta:path}")
 def leer(ruta: str, request: Request) -> Any:
-    admin = administrador(request)
+    cuenta = cuenta_actual(request)
+    if not puede_leer(cuenta.rol, ruta.strip("/")):
+        raise HTTPException(403, SIN_PERMISO)
+    admin = cuenta.id
     result: Any
     parts = ruta.split("/")
     recurso = parts[0]
     ident = parts[1] if len(parts) > 1 else None
     params = request.query_params
-    with transaccion("admin", admin) as c:
+    with transaccion(cuenta.actor, admin) as c:
         if ruta == "secuencias/solicitudes":
             from app.api.secuencias import solicitudes as solicitudes_ia
 

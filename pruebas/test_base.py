@@ -29,7 +29,10 @@ def test_sesion_y_logout(client):
     with transaccion() as c:
         row = uno(c, 'SELECT * FROM sesiones WHERE token_hash=%s', (hashlib.sha256(token.encode()).digest(),))
         assert row['expira_en'] > row['creada_en']
-    assert client.get('/api/auth/session').json() == {'ok': True}
+    sesion = client.get('/api/auth/session').json()
+    assert sesion['ok'] is True and sesion['cuenta']['rol'] == 'administrador'
+    assert sesion['cuenta']['correo'] == config().admin_correo
+    assert 'solicitudes-acceso' in sesion['permisos']['pantallas']
     assert client.get('/api/auth/logout').status_code == 302
     assert client.get('/api/auth/session').status_code == 401
 

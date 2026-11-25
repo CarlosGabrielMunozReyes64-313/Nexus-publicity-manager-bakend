@@ -261,6 +261,17 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                         {"ultimo_error": "Resultado incierto: requiere conciliación manual"},
                     )
                     auditar(c, "envio_incierto", "mensajes", ident)
+                    from app.notificaciones import notificar_administradores
+
+                    notificar_administradores(
+                        c,
+                        "tarea_fallida",
+                        "Envío con resultado incierto",
+                        "Un envío quedó sin confirmación de Gmail y los envíos se pausaron. "
+                        "Concilie en Gmail si el correo salió antes de reanudar las campañas.",
+                        "/campanas",
+                        f"envio_incierto:{ident}",
+                    )
                     return
                 if not recovered:
                     lim = limites(c)
