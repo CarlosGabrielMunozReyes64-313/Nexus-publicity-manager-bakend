@@ -751,16 +751,14 @@ def test_reanudar_conserva_espera_del_seguimiento(auth):
     assert proximo.astimezone(BOGOTA).date().isoformat() == "2026-10-20"
 
 
-def test_oauth_admite_admin_y_dominio(monkeypatch):
-    from app.seguridad.auth import correo_admitido
+def test_oauth_cualquier_dominio_verificado_solicita(client):
+    """Ya no se filtra por dominio: cualquier correo verificado puede pedir acceso."""
+    from app.seguridad.auth import resolver_identidad
 
-    cfg = config()
-    monkeypatch.setattr(cfg, "admin_correo", "dueno@gmail.com")
-    monkeypatch.setattr(cfg, "google_dominio_permitido", "nexusinnovacion.com")
-    assert correo_admitido("dueno@gmail.com", "")
-    assert correo_admitido("equipo@nexusinnovacion.com", "nexusinnovacion.com")
-    assert not correo_admitido("equipo@nexusinnovacion.com", "")
-    assert not correo_admitido("otra@gmail.com", "")
+    correo = f"persona-{uuid4().hex[:8]}@otro-dominio.example"
+    r = resolver_identidad(correo, "Persona Externa", "sub-1")
+    assert r.headers["location"].endswith("/login?solicitud=enviada")
+    assert "nexus_sesion" not in r.headers.get("set-cookie", "")
 
 
 def test_gmail_callback_vuelve_a_configuracion(client):

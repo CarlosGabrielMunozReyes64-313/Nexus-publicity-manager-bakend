@@ -43,15 +43,25 @@ def activar_formulario_inicial(c: db.Conn) -> None:
         )
 
 
+def asegurar_administrador(c: db.Conn, correo: str) -> None:
+    """El administrador configurado (ADMIN_CORREO) siempre existe con rol administrador.
+
+    Si la fila no existe se crea activa. Si existe, solo se garantiza el rol: su estado
+    activo o inactivo se respeta (una desactivación explícita no se deshace al arrancar).
+    """
+    c.execute(
+        "INSERT INTO administradores(correo,nombre,rol) VALUES(%s,'Administrador NEXUS','administrador') "
+        "ON CONFLICT(correo) DO UPDATE SET rol='administrador' WHERE administradores.rol<>'administrador'",
+        (correo.strip().lower(),),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = config()
     db.abrir(cfg.database_url.get_secret_value())
     with db.transaccion() as c:
-        c.execute(
-            "INSERT INTO administradores(correo,nombre) VALUES(%s,'Administrador NEXUS') ON CONFLICT(correo) DO NOTHING",
-            (cfg.admin_correo,),
-        )
+        asegurar_administrador(c, cfg.admin_correo)
     with db.transaccion("sistema", accion="activar_formulario_inicial") as c:
         activar_formulario_inicial(c)
     yield
@@ -152,6 +162,12 @@ def crear_app() -> FastAPI:
         return JSONResponse({"message": message}, status_code=status)
 
     app.include_router(auth_router)
+    from app.notificaciones import router as notificaciones_router
+    from app.seguridad.accesos import router as accesos_router
+
+    # Antes del enrutador general de /api, que atiende cualquier otra ruta.
+    app.include_router(accesos_router)
+    app.include_router(notificaciones_router)
     from app.publico.rutas import router as publico_router
 
     app.include_router(publico_router)

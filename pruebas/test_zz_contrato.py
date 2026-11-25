@@ -20,7 +20,7 @@ def test_todas_las_lecturas_con_datos(auth):
         insertar(c,'recomendaciones',{'texto':'Muestra insuficiente'})
         insertar(c,'puntajes',{'empresa_id':ct['empresa_id'],'total':0,'incompleto':True,'criterios':Jsonb([{'nombre':'Criterio','cumple':None,'peso':30,'explicacion':'Sin fuente'}]),'version_reglas':1})
         insertar(c,'interacciones',{'contacto_id':ct['id'],'tipo':'nota','resumen':'Nota de prueba'})
-    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica','agentes/solicitudes':'solicitudAgente','propuestas/solicitudes':'solicitudRuta','propuestas/rutas-correo/segmentos':'segmentoRuta'}
+    mappings={'empresas':'empresa','contactos':'contacto','segmentos':'segmento','secuencias':'secuencia','campanas':'campana','propuestas':'propuesta','respuestas':'respuesta','oportunidades':'oportunidad','integraciones':'integracion','supresiones':'supresion','duplicados':'duplicado','auditoria':'auditoria','descubrimiento/busquedas':'busqueda','informes/recomendaciones':'recomendacion','informes/metricas':'metrica','agentes/solicitudes':'solicitudAgente','propuestas/solicitudes':'solicitudRuta','propuestas/rutas-correo/segmentos':'segmentoRuta','solicitudes-acceso':'solicitudAcceso'}
     records=[]
     for path,schema in mappings.items():
         res=auth.get('/api/'+path)
@@ -36,7 +36,7 @@ def test_todas_las_lecturas_con_datos(auth):
                 detail=auth.get('/api/'+path+'/'+ident+'/'+suffix)
                 assert detail.status_code==200
                 records.append({'ruta':path+'/'+ident+'/'+suffix,'schema':'interaccion' if path=='contactos' else 'inscripcion','array':True,'data':detail.json()})
-    for path,schema in {'configuracion/marca':'marca','configuracion/limites':'limites','configuracion/cliente-ideal':'clienteIdeal','configuracion/cumplimiento':'cumplimiento','descubrimiento/meta':'metaDescubrimiento','terminal':'terminal','panel/resumen':'resumen','embudo':'embudo','embudo?desde=2026-01-01&hasta=2026-12-31':'embudo','auth/session':'ok','auditoria/pagina?tamano=5&accion=a':'paginaAuditoria'}.items():
+    for path,schema in {'configuracion/marca':'marca','configuracion/limites':'limites','configuracion/cliente-ideal':'clienteIdeal','configuracion/cumplimiento':'cumplimiento','descubrimiento/meta':'metaDescubrimiento','terminal':'terminal','panel/resumen':'resumen','embudo':'embudo','embudo?desde=2026-01-01&hasta=2026-12-31':'embudo','auth/session':'sesion','notificaciones':'bandejaNotificaciones','auditoria/pagina?tamano=5&accion=a':'paginaAuditoria'}.items():
         res=auth.get('/api/'+path)
         assert res.status_code==200,(path,res.text)
         records.append({'ruta':path,'schema':schema,'array':False,'data':res.json()})

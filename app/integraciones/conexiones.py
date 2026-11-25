@@ -39,8 +39,10 @@ def credenciales_servicio() -> Any:
     return service_account.Credentials.from_service_account_file(raw, scopes=scopes)  # type: ignore[no-untyped-call]
 
 
-def pausar_todo(c: Conn, detalle: str) -> None:
-    for r in todos(c, "SELECT id FROM campanas WHERE estado='activa'"):
+def pausar_todo(c: Conn, detalle: str) -> int:
+    """Pausa todas las campañas activas. Devuelve cuántas estaban activas."""
+    activas = todos(c, "SELECT id FROM campanas WHERE estado='activa'")
+    for r in activas:
         cid = r["id"]
         c.execute("UPDATE campanas SET estado='pausada' WHERE id=%s", (cid,))
         c.execute(
@@ -52,6 +54,7 @@ def pausar_todo(c: Conn, detalle: str) -> None:
             (cid,),
         )
     c.execute("UPDATE integraciones SET detalle=%s WHERE id='gmail'", (detalle,))
+    return len(activas)
 
 
 DESCONECTADA = {

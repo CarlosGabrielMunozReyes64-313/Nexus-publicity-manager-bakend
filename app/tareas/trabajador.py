@@ -1,3 +1,4 @@
+import hashlib
 import signal
 import time
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
 from app.dominio.reglas import BOGOTA
 from app.integraciones.conexiones import pausar_todo
+from app.notificaciones import avisar_fallo_tarea, notificar_administradores
 from app.tareas.bitacora import RUTINARIAS, corto, describir, evento, latido
 from app.tareas.bitacora import hora as hora_bogota
 from app.tareas.programador import programar
@@ -392,6 +394,7 @@ def procesar(t: db.Row) -> None:
                 or isinstance(exc, HttpError)
                 and exc.resp.status == 401
             )
+            avisado = False
             if auth_error and t["tipo"] in (
                 "enviar_mensaje",
                 "sincronizar_gmail",
@@ -403,7 +406,18 @@ def procesar(t: db.Row) -> None:
                     "gmail",
                     {"estado": "error", "detalle": "Google requiere renovar la autorización"},
                 )
-                pausar_todo(c, "Gmail requiere renovar autorización")
+                pausadas = pausar_todo(c, "Gmail requiere renovar autorización")
+                notificar_administradores(
+                    c,
+                    "fallo_integracion",
+                    "Gmail requiere renovar la autorización",
+                    "Google rechazó la autorización de la cuenta de envío. "
+                    + (f"Se pausaron {pausadas} campaña(s) activa(s). " if pausadas else "")
+                    + "Vuelva a conectar Gmail en Configuración → Integraciones.",
+                    "/configuracion",
+                    "integracion:gmail:autorizacion",
+                )
+                avisado = True
             if state == "fallida":
                 if t["tipo"] == "enviar_mensaje" or (
                     t["tipo"] == "sincronizar_gmail" and gmail_falla_seguido(c)
@@ -418,7 +432,20 @@ def procesar(t: db.Row) -> None:
                             "error",
                             t["id"],
                         )
-                    pausar_todo(c, f"Envíos en pausa: {motivo}")
+                    pausadas = pausar_todo(c, f"Envíos en pausa: {motivo}")
+                    if pausadas and not avisado:
+                        notificar_administradores(
+                            c,
+                            "pausa_envios",
+                            "Envíos en pausa: Gmail falla",
+                            f"{motivo}. Se pausaron {pausadas} campaña(s) activa(s). "
+                            "Reanúdelas cuando se resuelva.",
+                            "/campanas",
+                            "pausa_gmail:" + hashlib.sha256(motivo.encode()).hexdigest()[:16],
+                        )
+                        avisado = True
+                if not avisado:
+                    avisar_fallo_tarea(c, t["tipo"], descripcion, motivo)
                 if t["tipo"] == "descubrir_empresas":
                     actualizar(
                         c,

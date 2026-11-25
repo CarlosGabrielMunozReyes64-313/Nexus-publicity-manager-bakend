@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
@@ -13,7 +14,8 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.id_token import verify_oauth2_token
 
 from app.config import config
-from app.db import auditar, insertar, transaccion, uno
+from app.db import Conn, auditar, insertar, transaccion, uno
+from app.seguridad.permisos import ETIQUETAS, publicos
 
 router = APIRouter(prefix="/api")
 COOKIE = "nexus_sesion"
@@ -31,29 +33,66 @@ def descifrar(value: bytes) -> str:
     return Fernet(config().clave_cifrado.get_secret_value().encode()).decrypt(value).decode()
 
 
-def administrador(request: Request) -> str:
+@dataclass(frozen=True)
+class Cuenta:
+    """Persona con sesión válida: un administrador o un usuario aprobado."""
+
+    id: str
+    correo: str
+    nombre: str
+    rol: str
+
+    @property
+    def actor(self) -> str:
+        # Valor de nexus.actor en la auditoría: los administradores conservan «admin».
+        return "admin" if self.rol == "administrador" else "usuario"
+
+
+SIN_PERMISO = "Su cuenta no tiene permiso para esta acción"
+
+
+def cuenta_actual(request: Request) -> Cuenta:
+    """Sesión válida o 401 (vencida, revocada, inexistente o cuenta desactivada)."""
     token = request.cookies.get(COOKIE, "")
+    if not token:
+        raise HTTPException(401, "Inicie sesión para continuar")
     with transaccion() as c:
         r = uno(
             c,
-            "SELECT a.id FROM sesiones s JOIN administradores a ON a.id=s.administrador_id WHERE s.token_hash=%s AND s.revocada_en IS NULL AND s.expira_en>now() AND a.activo",
+            "SELECT a.id,a.correo,a.nombre,a.rol FROM sesiones s JOIN administradores a ON a.id=s.administrador_id WHERE s.token_hash=%s AND s.revocada_en IS NULL AND s.expira_en>now() AND a.activo",
             (digest(token),),
             False,
         )
     if not r:
-        raise HTTPException(401, "Inicie sesión para continuar")
-    return str(r["id"])
+        raise HTTPException(401, "Su sesión venció o no es válida. Inicie sesión de nuevo")
+    return Cuenta(str(r["id"]), str(r["correo"]), str(r["nombre"]), str(r["rol"]))
 
 
-def sesion(admin: str) -> RedirectResponse:
+def administrador(request: Request) -> str:
+    """Solo administradores: 401 sin sesión válida, 403 con sesión válida sin permiso."""
+    cuenta = cuenta_actual(request)
+    if cuenta.rol != "administrador":
+        raise HTTPException(403, SIN_PERMISO)
+    return cuenta.id
+
+
+def sesion(cuenta_id: str) -> RedirectResponse:
     token = secrets.token_urlsafe(32)
-    with transaccion("admin", admin, "inicio_sesion") as c:
+    with transaccion() as c:
+        r = uno(c, "SELECT rol FROM administradores WHERE id=%s AND activo", (cuenta_id,))
+        actor = "admin" if r["rol"] == "administrador" else "usuario"
+        for k, v in {
+            "actor": actor,
+            "administrador_id": cuenta_id,
+            "accion": "inicio_sesion",
+        }.items():
+            c.execute("SELECT set_config(%s, %s, true)", ("nexus." + k, v))
         c.execute(
             "INSERT INTO sesiones(administrador_id,token_hash,expira_en) VALUES(%s,%s,now()+interval '12 hours')",
-            (admin, digest(token)),
+            (cuenta_id, digest(token)),
         )
-        c.execute("UPDATE administradores SET ultimo_acceso=now() WHERE id=%s", (admin,))
-        auditar(c, "inicio_sesion", "administradores", admin)
+        c.execute("UPDATE administradores SET ultimo_acceso=now() WHERE id=%s", (cuenta_id,))
+        auditar(c, "inicio_sesion", "administradores", cuenta_id)
     response = RedirectResponse(config().app_url + "/", status_code=302)
     response.set_cookie(
         COOKIE,
@@ -68,9 +107,19 @@ def sesion(admin: str) -> RedirectResponse:
 
 
 @router.get("/auth/session")
-def comprobar(request: Request) -> dict[str, bool]:
-    administrador(request)
-    return {"ok": True}
+def comprobar(request: Request) -> dict[str, Any]:
+    cuenta = cuenta_actual(request)
+    return {
+        "ok": True,
+        "cuenta": {
+            "id": cuenta.id,
+            "correo": cuenta.correo,
+            "nombre": cuenta.nombre,
+            "rol": cuenta.rol,
+            "rolEtiqueta": ETIQUETAS.get(cuenta.rol, cuenta.rol),
+        },
+        "permisos": publicos(cuenta.rol),
+    }
 
 
 @router.get("/auth/logout")
@@ -79,14 +128,14 @@ def logout(request: Request) -> RedirectResponse:
     with transaccion() as c:
         r = uno(
             c,
-            "UPDATE sesiones SET revocada_en=now() WHERE token_hash=%s AND revocada_en IS NULL RETURNING administrador_id",
+            "UPDATE sesiones s SET revocada_en=now() FROM administradores a WHERE a.id=s.administrador_id AND s.token_hash=%s AND s.revocada_en IS NULL RETURNING s.administrador_id, a.rol",
             (digest(token),),
             False,
         )
         if r:
             c.execute(
-                "SELECT set_config('nexus.actor','admin',true), set_config('nexus.administrador_id',%s,true)",
-                (str(r["administrador_id"]),),
+                "SELECT set_config('nexus.actor',%s,true), set_config('nexus.administrador_id',%s,true)",
+                ("admin" if r["rol"] == "administrador" else "usuario", str(r["administrador_id"])),
             )
             auditar(c, "cierre_sesion", "administradores", str(r["administrador_id"]))
     response = RedirectResponse(config().app_url + "/login", status_code=302)
@@ -146,9 +195,14 @@ def iniciar(finalidad: str, admin: str | None = None) -> RedirectResponse:
 
 
 @router.get("/auth/google")
-def google() -> RedirectResponse:
+def google(request: Request) -> RedirectResponse:
     cfg = config()
     if cfg.app_env == "development" and cfg.auth_dev_bypass:
+        # Solo desarrollo (la configuración lo prohíbe en producción): simula la identidad
+        # verificada de otra persona para probar solicitudes sin Google.
+        como = request.query_params.get("como", "").strip().lower()
+        if como and "@" in como:
+            return resolver_identidad(como, request.query_params.get("nombre", "")[:200], "")
         with transaccion() as c:
             r = uno(
                 c, "SELECT id FROM administradores WHERE correo=%s AND activo", (cfg.admin_correo,)
@@ -197,36 +251,82 @@ def intercambio(request: Request, finalidad: str) -> tuple[dict[str, Any], dict[
         raise HTTPException(403, "Cuenta no autorizada")
     tokens["correo"] = correo
     tokens["hd"] = str(claims.get("hd") or "").lower()
+    tokens["nombre"] = " ".join(str(claims.get("name") or "").split())[:200]
+    tokens["sub"] = str(claims.get("sub") or "")[:255]
     return tokens, row
 
 
-def correo_admitido(correo: str, hd: str) -> bool:
-    """El administrador configurado siempre; otros, solo del dominio de Workspace permitido.
+def a_login(parametro: str) -> RedirectResponse:
+    response = RedirectResponse(config().app_url + "/login?" + parametro, status_code=302)
+    response.delete_cookie("nexus_oauth", path="/api")
+    return response
 
-    La lista final de personas autorizadas está en nexus.administradores (activos).
+
+def registrar_solicitud(c: Conn, correo: str, nombre: str, sub: str) -> tuple[str, bool]:
+    """Una única solicitud por correo verificado. Devuelve (estado, es_nueva).
+
+    El INSERT ... ON CONFLICT es atómico: dos identificaciones simultáneas de la misma
+    persona crean una sola fila y solo la que la crea avisa a los administradores.
     """
-    cfg = config()
-    if correo == cfg.admin_correo.strip().lower():
-        return True
-    dominio = cfg.google_dominio_permitido.strip().lower()
-    return bool(dominio) and correo.endswith("@" + dominio) and hd == dominio
+    from app.notificaciones import notificar_administradores
+
+    r = uno(
+        c,
+        """INSERT INTO solicitudes_acceso(correo,nombre,google_sub) VALUES(%s,%s,%s)
+        ON CONFLICT ON CONSTRAINT solicitudes_acceso_correo_uq DO UPDATE SET
+          ultima_identificacion_en=now(),
+          identificaciones=solicitudes_acceso.identificaciones+1,
+          nombre=coalesce(solicitudes_acceso.nombre, EXCLUDED.nombre),
+          google_sub=coalesce(solicitudes_acceso.google_sub, EXCLUDED.google_sub)
+        RETURNING id, estado, (xmax = 0) AS nueva""",
+        (correo, nombre or None, sub or None),
+    )
+    if r["nueva"]:
+        quien = f"{nombre} ({correo})" if nombre else correo
+        notificar_administradores(
+            c,
+            "solicitud_acceso",
+            "Nueva solicitud de acceso",
+            f"{quien} pidió acceso a NEXUS con Google. Revísela para aprobarla o rechazarla.",
+            f"/solicitudes-acceso?id={r['id']}",
+            f"solicitud:{r['id']}",
+        )
+    return str(r["estado"]), bool(r["nueva"])
+
+
+def resolver_identidad(correo: str, nombre: str, sub: str) -> RedirectResponse:
+    """Decide qué ocurre con una identidad de Google ya verificada (correo verificado).
+
+    - Cuenta existente activa (administrador o usuario aprobado): inicia sesión con su rol.
+    - Cuenta existente desactivada: sin acceso. Nunca se reabre por el flujo de solicitudes.
+    - Sin cuenta: crea o consulta su solicitud. No emite la cookie de sesión.
+    """
+    correo = correo.strip().lower()
+    with transaccion("sistema", accion="identificacion_google") as c:
+        cuenta = uno(c, "SELECT id, activo FROM administradores WHERE correo=%s", (correo,), False)
+        if not cuenta:
+            estado, nueva = registrar_solicitud(c, correo, nombre, sub)
+    if cuenta:
+        if not cuenta["activo"]:
+            return a_login("error=acceso_denegado")
+        response = sesion(str(cuenta["id"]))
+        response.delete_cookie("nexus_oauth", path="/api")
+        return response
+    if estado == "rechazada":
+        return a_login("solicitud=rechazada")
+    # «aprobada» sin cuenta no ocurre: la aprobación crea la cuenta en la misma transacción.
+    return a_login("solicitud=" + ("enviada" if nueva else "pendiente"))
 
 
 @router.get("/auth/google/callback")
 def callback(request: Request) -> RedirectResponse:
+    if request.query_params.get("error"):
+        return a_login("error=cancelado")
     try:
         tokens, _ = intercambio(request, "login")
-        if not correo_admitido(tokens["correo"], tokens["hd"]):
-            raise HTTPException(403, "Cuenta no autorizada")
-        with transaccion() as c:
-            r = uno(
-                c, "SELECT id FROM administradores WHERE correo=%s AND activo", (tokens["correo"],)
-            )
-        response = sesion(str(r["id"]))
-        response.delete_cookie("nexus_oauth", path="/api")
-        return response
     except (HTTPException, ValueError, KeyError, httpx.HTTPError):
-        return RedirectResponse(config().app_url + "/login?error=acceso_denegado", status_code=302)
+        return a_login("error=acceso_denegado")
+    return resolver_identidad(tokens["correo"], tokens.get("nombre", ""), tokens.get("sub", ""))
 
 
 GMAIL_PERMISOS = {
