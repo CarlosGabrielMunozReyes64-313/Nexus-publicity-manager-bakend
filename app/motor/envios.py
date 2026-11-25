@@ -261,9 +261,9 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                         {"ultimo_error": "Resultado incierto: requiere conciliación manual"},
                     )
                     auditar(c, "envio_incierto", "mensajes", ident)
-                    from app.notificaciones import notificar_administradores
+                    from app.notificaciones import notificar_responsables
 
-                    notificar_administradores(
+                    notificar_responsables(
                         c,
                         "tarea_fallida",
                         "Envío con resultado incierto",

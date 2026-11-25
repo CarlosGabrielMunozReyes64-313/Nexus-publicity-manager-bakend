@@ -41,10 +41,10 @@ def revisar(c: Conn) -> None:
         pausadas = pausar_todo(c, motivo)
         auditar(c, "alerta_correo", "integraciones", "gmail")
         if pausadas:
-            from app.notificaciones import notificar_administradores
+            from app.notificaciones import notificar_responsables
 
             dia = uno(c, "SELECT (now() AT TIME ZONE 'America/Bogota')::date AS d")["d"]
-            notificar_administradores(
+            notificar_responsables(
                 c,
                 "pausa_envios",
                 f"Envíos en pausa: {motivo.split(':')[0].lower()}",

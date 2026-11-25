@@ -90,6 +90,24 @@ def notificar_administradores(
     return cur.rowcount
 
 
+def notificar_responsables(
+    c: Conn, tipo: str, titulo: str, descripcion: str, enlace: str | None, clave: str
+) -> int:
+    """Avisos operativos (pausas, fallos): todas las cuentas activas que pueden resolverlos.
+
+    Administradores y usuarios aprobados operan igual el negocio; las solicitudes de acceso
+    van solo a los administradores (notificar_administradores).
+    """
+    assert tipo in TIPOS
+    cur = c.execute(
+        "INSERT INTO notificaciones(destinatario_id,tipo,titulo,descripcion,enlace,clave) "
+        "SELECT id,%s,%s,%s,%s,%s FROM administradores "
+        "WHERE activo AND rol IN ('administrador','usuario')" + _UPSERT,
+        (tipo, _texto(titulo, 200), _texto(descripcion, 1000), enlace, _texto(clave, 300)),
+    )
+    return cur.rowcount
+
+
 def _publica(fila: dict[str, Any], rol: str) -> dict[str, Any]:
     enlace = fila.pop("enlace", None)
     fila["leida"] = fila["leida_en"] is not None
@@ -184,7 +202,7 @@ def avisar_fallo_tarea(c: Conn, tipo: str, descripcion: str, motivo: str) -> Non
     huella = hashlib.sha256(motivo.encode()).hexdigest()[:16]
     servicio = INTEGRACIONES_TAREA.get(tipo)
     if servicio:
-        notificar_administradores(
+        notificar_responsables(
             c,
             "fallo_integracion",
             f"Falla la integración con {servicio}",
@@ -193,7 +211,7 @@ def avisar_fallo_tarea(c: Conn, tipo: str, descripcion: str, motivo: str) -> Non
             f"integracion:{tipo}:{huella}",
         )
         return
-    notificar_administradores(
+    notificar_responsables(
         c,
         "tarea_fallida",
         f"Requiere intervención: {descripcion}",

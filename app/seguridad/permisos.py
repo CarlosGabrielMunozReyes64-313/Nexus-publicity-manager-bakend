@@ -3,8 +3,9 @@ que el frontend muestre los mismos menús, botones y rutas.
 
 - administrador: todo (gestión de accesos, integraciones, configuración, envíos y cambios
   de campañas, y todas las lecturas).
-- usuario: solo lectura del panel (indicadores agregados y embudo) y su propia bandeja de
-  notificaciones. Ninguna escritura sobre datos del negocio.
+- usuario (cuenta aprobada por un administrador): lo mismo que el administrador (datos,
+  campañas, envíos, integraciones, configuración y auditoría), salvo gestionar accesos:
+  no ve ni decide solicitudes de acceso.
 """
 
 from typing import Literal
@@ -32,33 +33,37 @@ PANTALLAS_ADMIN = (
 )
 PANTALLAS: dict[str, tuple[str, ...]] = {
     "administrador": PANTALLAS_ADMIN,
-    "usuario": ("",),
+    "usuario": tuple(p for p in PANTALLAS_ADMIN if p != "solicitudes-acceso"),
 }
 # Capacidades que el frontend usa para mostrar u ocultar acciones.
+CAPACIDADES_ADMIN = (
+    "panel:ver",
+    "datos:ver",
+    "datos:modificar",
+    "campanas:modificar",
+    "envios:gestionar",
+    "integraciones:gestionar",
+    "configuracion:gestionar",
+    "accesos:gestionar",
+    "auditoria:ver",
+)
 CAPACIDADES: dict[str, tuple[str, ...]] = {
-    "administrador": (
-        "panel:ver",
-        "datos:ver",
-        "datos:modificar",
-        "campanas:modificar",
-        "envios:gestionar",
-        "integraciones:gestionar",
-        "configuracion:gestionar",
-        "accesos:gestionar",
-        "auditoria:ver",
-    ),
-    "usuario": ("panel:ver",),
+    "administrador": CAPACIDADES_ADMIN,
+    "usuario": tuple(c for c in CAPACIDADES_ADMIN if c != "accesos:gestionar"),
 }
-# Lecturas GET de /api/... que el rol «usuario» puede hacer (ruta exacta, sin consulta).
-LECTURAS_USUARIO = frozenset({"panel/resumen", "embudo"})
+# Rutas de /api/... reservadas al administrador (gestión de accesos).
+SOLO_ADMINISTRADOR = ("solicitudes-acceso",)
 
 
 def puede_leer(rol: str, ruta: str) -> bool:
-    return rol == "administrador" or (rol == "usuario" and ruta in LECTURAS_USUARIO)
+    if rol == "administrador":
+        return True
+    return rol == "usuario" and not ruta.startswith(SOLO_ADMINISTRADOR)
 
 
-def puede_escribir(rol: str) -> bool:
-    return rol == "administrador"
+def puede_operar(rol: str) -> bool:
+    """Escrituras del negocio: campañas, datos, envíos, integraciones y configuración."""
+    return rol in ROLES
 
 
 def pantalla_permitida(rol: str, enlace: str | None) -> bool:

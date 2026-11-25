@@ -28,7 +28,7 @@ from app.config import config
 from app.db import actualizar, obtener, transaccion, uno
 from app.dominio.reglas import BOGOTA
 from app.integraciones.conexiones import pausar_todo
-from app.notificaciones import avisar_fallo_tarea, notificar_administradores
+from app.notificaciones import avisar_fallo_tarea, notificar_responsables
 from app.tareas.bitacora import RUTINARIAS, corto, describir, evento, latido
 from app.tareas.bitacora import hora as hora_bogota
 from app.tareas.programador import programar
@@ -407,7 +407,7 @@ def procesar(t: db.Row) -> None:
                     {"estado": "error", "detalle": "Google requiere renovar la autorización"},
                 )
                 pausadas = pausar_todo(c, "Gmail requiere renovar autorización")
-                notificar_administradores(
+                notificar_responsables(
                     c,
                     "fallo_integracion",
                     "Gmail requiere renovar la autorización",
@@ -434,7 +434,7 @@ def procesar(t: db.Row) -> None:
                         )
                     pausadas = pausar_todo(c, f"Envíos en pausa: {motivo}")
                     if pausadas and not avisado:
-                        notificar_administradores(
+                        notificar_responsables(
                             c,
                             "pausa_envios",
                             "Envíos en pausa: Gmail falla",

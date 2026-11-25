@@ -15,7 +15,7 @@ from google.oauth2.id_token import verify_oauth2_token
 
 from app.config import config
 from app.db import Conn, auditar, insertar, transaccion, uno
-from app.seguridad.permisos import ETIQUETAS, publicos
+from app.seguridad.permisos import ETIQUETAS, publicos, puede_operar
 
 router = APIRouter(prefix="/api")
 COOKIE = "nexus_sesion"
@@ -44,8 +44,9 @@ class Cuenta:
 
     @property
     def actor(self) -> str:
-        # Valor de nexus.actor en la auditoría: los administradores conservan «admin».
-        return "admin" if self.rol == "administrador" else "usuario"
+        # nexus.actor de la auditoría: toda persona es «admin»; quién fue lo dice
+        # administrador_id (así los filtros existentes del registro siguen sirviendo).
+        return "admin"
 
 
 SIN_PERMISO = "Su cuenta no tiene permiso para esta acción"
@@ -68,8 +69,16 @@ def cuenta_actual(request: Request) -> Cuenta:
     return Cuenta(str(r["id"]), str(r["correo"]), str(r["nombre"]), str(r["rol"]))
 
 
+def operador(request: Request) -> str:
+    """Cuentas que operan el negocio (administradores y usuarios aprobados): 401 o 403."""
+    cuenta = cuenta_actual(request)
+    if not puede_operar(cuenta.rol):
+        raise HTTPException(403, SIN_PERMISO)
+    return cuenta.id
+
+
 def administrador(request: Request) -> str:
-    """Solo administradores: 401 sin sesión válida, 403 con sesión válida sin permiso."""
+    """Solo administradores (gestión de accesos): 401 sin sesión, 403 sin permiso."""
     cuenta = cuenta_actual(request)
     if cuenta.rol != "administrador":
         raise HTTPException(403, SIN_PERMISO)
@@ -79,10 +88,9 @@ def administrador(request: Request) -> str:
 def sesion(cuenta_id: str) -> RedirectResponse:
     token = secrets.token_urlsafe(32)
     with transaccion() as c:
-        r = uno(c, "SELECT rol FROM administradores WHERE id=%s AND activo", (cuenta_id,))
-        actor = "admin" if r["rol"] == "administrador" else "usuario"
+        uno(c, "SELECT id FROM administradores WHERE id=%s AND activo", (cuenta_id,))
         for k, v in {
-            "actor": actor,
+            "actor": "admin",
             "administrador_id": cuenta_id,
             "accion": "inicio_sesion",
         }.items():
@@ -135,7 +143,7 @@ def logout(request: Request) -> RedirectResponse:
         if r:
             c.execute(
                 "SELECT set_config('nexus.actor',%s,true), set_config('nexus.administrador_id',%s,true)",
-                ("admin" if r["rol"] == "administrador" else "usuario", str(r["administrador_id"])),
+                ("admin", str(r["administrador_id"])),
             )
             auditar(c, "cierre_sesion", "administradores", str(r["administrador_id"]))
     response = RedirectResponse(config().app_url + "/login", status_code=302)
@@ -213,7 +221,7 @@ def google(request: Request) -> RedirectResponse:
 
 @router.get("/integraciones/gmail/autorizar")
 def gmail_autorizar(request: Request) -> RedirectResponse:
-    return iniciar("gmail", administrador(request))
+    return iniciar("gmail", operador(request))
 
 
 def intercambio(request: Request, finalidad: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -353,7 +361,7 @@ def gmail_callback(request: Request) -> RedirectResponse:
     except (HTTPException, ValueError, KeyError, httpx.HTTPError):
         return volver_a_configuracion("solicitud")
     try:
-        admin = administrador(request)
+        admin = operador(request)
     except HTTPException:
         return volver_a_configuracion("sesion")
     cuenta = config().gmail_cuenta_envio.strip().lower()

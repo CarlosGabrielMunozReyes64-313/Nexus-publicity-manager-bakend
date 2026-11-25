@@ -115,15 +115,17 @@ def test_recorrido_aprobacion_completo(client):
     assert r.headers["location"] == config().app_url + "/"
     sesion = client.get("/api/auth/session").json()
     assert sesion["cuenta"]["rol"] == "usuario" and sesion["cuenta"]["rolEtiqueta"] == "Usuario"
-    assert sesion["permisos"]["pantallas"] == ["panel"]
+    pantallas = sesion["permisos"]["pantallas"]
+    assert "solicitudes-acceso" not in pantallas and {"contactos", "configuracion"} <= set(pantallas)
+    assert "accesos:gestionar" not in sesion["permisos"]["capacidades"]
     bandeja = client.get("/api/notificaciones").json()
     assert bandeja["sinLeer"] == 1
     assert bandeja["items"][0]["titulo"] == "Tu acceso fue aprobado"
     assert client.get("/api/panel/resumen").status_code == 200
-    assert client.get("/api/embudo").status_code == 200
+    assert client.get("/api/contactos").status_code == 200
 
 
-def test_usuario_sin_permisos_de_administrador(client):
+def test_usuario_aprobado_opera_todo_menos_accesos(client):
     externa = nuevo_correo()
     con_google(client, externa)
     como_admin(client)
@@ -141,12 +143,19 @@ def test_usuario_sin_permisos_de_administrador(client):
     r = client.post(f"/api/solicitudes-acceso/{otra_sol['id']}/aprobar", json={})
     assert r.status_code == 403 and r.json()["message"] == auth.SIN_PERMISO
     assert solicitud_de(otra)["estado"] == "pendiente"
+    # Todo lo demás del administrador: lecturas, cambios, integraciones y configuración.
     for ruta in ("contactos", "configuracion/marca", "integraciones", "auditoria", "campanas", "terminal"):
-        assert client.get("/api/" + ruta).status_code == 403, ruta
-    assert client.post("/api/campanas/x/pausar", json={}).status_code == 403
-    assert client.put("/api/configuracion/marca", json={}).status_code == 403
-    assert client.post("/api/integraciones/gmail/desconectar", json={}).status_code == 403
-    assert client.get("/api/integraciones/gmail/autorizar").status_code == 403
+        assert client.get("/api/" + ruta).status_code == 200, ruta
+    marca = client.get("/api/configuracion/marca").json()
+    assert client.put("/api/configuracion/marca", json=marca).status_code == 200
+    r = client.post("/api/empresas", json={"id": "nuevo", "razonSocial": "Usuario SAS " + uuid4().hex[:6], "municipio": "Palmira"})
+    assert r.status_code == 200, r.text
+    assert client.post("/api/campanas/no-existe/pausar", json={}).status_code != 403
+    assert client.get("/api/integraciones/gmail/autorizar").status_code != 403
+    with transaccion() as c:
+        fila = uno(c, "SELECT actor,administrador_id FROM registro_auditoria WHERE entidad='configuracion' ORDER BY id DESC LIMIT 1")
+        cuenta = uno(c, "SELECT id FROM administradores WHERE correo=%s", (externa,))
+    assert fila["actor"] == "admin" and fila["administrador_id"] == cuenta["id"]
     # Notificaciones ajenas: ni se ven ni se pueden marcar.
     ids = {a["id"] for a in client.get("/api/notificaciones").json()["items"]}
     assert str(ajeno) not in ids

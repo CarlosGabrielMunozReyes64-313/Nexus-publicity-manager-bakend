@@ -12,7 +12,7 @@ from app.db import actualizar, encolar, obtener, todos, transaccion, uno
 from app.dominio.reglas import ventanas_compatibles
 from app.esquemas.entradas import Limites, Marca
 from app.esquemas.serializar import serializar
-from app.seguridad.auth import SIN_PERMISO, administrador, cuenta_actual
+from app.seguridad.auth import SIN_PERMISO, cuenta_actual, operador
 from app.seguridad.permisos import puede_leer
 
 router = APIRouter(prefix="/api")
@@ -171,7 +171,7 @@ def leer_secuencias(c: Any, parts: list[str], params: Mapping[str, str]) -> Any:
 
 @router.api_route("/{ruta:path}", methods=["POST", "PATCH", "PUT"])
 async def escribir(ruta: str, request: Request) -> Any:
-    admin = administrador(request)
+    admin = operador(request)
     try:
         raw = await request.body()
         body = await request.json() if raw else {}
@@ -204,7 +204,7 @@ async def escribir(ruta: str, request: Request) -> Any:
 @router.delete("/{ruta:path}")
 def borrar(ruta: str, request: Request) -> Any:
     """DELETE: por ahora solo descartar una sugerencia de «Mejorar con IA»."""
-    admin = administrador(request)
+    admin = operador(request)
     p = ruta.split("/")
     if len(p) == 4 and p[0] == "secuencias" and p[2] == "sugerencias":
         from app.api import secuencias as sec

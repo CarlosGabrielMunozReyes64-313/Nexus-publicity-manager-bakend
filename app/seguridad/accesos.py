@@ -109,8 +109,8 @@ def aprobar(c: Conn, solicitud: dict[str, Any]) -> None:
             str(cuenta["id"]),
             "acceso_aprobado",
             "Tu acceso fue aprobado",
-            "Un administrador aprobó tu solicitud. Entraste con el rol «Usuario»: puedes "
-            "consultar el panel general.",
+            "Un administrador aprobó tu solicitud. Tienes acceso completo a NEXUS, salvo "
+            "aprobar o rechazar solicitudes de acceso.",
             "/",
             f"acceso_aprobado:{solicitud['id']}",
         )
