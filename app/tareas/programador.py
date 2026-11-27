@@ -24,6 +24,15 @@ def programar(c: Conn, ahora: datetime) -> None:
             encolar(c, "sincronizar_gmail", {}, "gmail:" + minute, 2)
     if now.minute % 5 == 0:
         encolar(c, "liberar_tareas_colgadas", {}, "liberar:" + minute, 1)
+        if "gmail" in integraciones and todos(
+            c,
+            "SELECT 1 FROM mensajes WHERE estado='enviando' AND conciliacion='pendiente' LIMIT 1",
+        ):
+            encolar(c, "conciliar_envios", {}, "conciliar:" + minute, 2)
+    from app.integraciones import bajas
+
+    if bajas.configurada() and bajas.hay_pendientes(c):
+        encolar(c, "sincronizar_bajas", {}, "bajas:" + minute, 2)
     if now.hour >= 6:
         day = now.date().isoformat()
         for tipo, integracion in (

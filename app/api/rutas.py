@@ -36,6 +36,41 @@ def leer(ruta: str, request: Request) -> Any:
             result = solicitudes_ia(c)
         elif recurso == "secuencias" and ident != "solicitudes":
             result = leer_secuencias(c, parts, params)
+        elif ruta == "contactos/exportar":
+            from app.api.importacion import exportar_xlsx
+
+            xlsx, nombre = exportar_xlsx(c, params)
+            return Response(
+                xlsx,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
+            )
+        elif recurso == "listas":
+            from app.api import listas
+
+            if not ident:
+                result = listas.lista(c, params)
+            elif len(parts) == 2:
+                result = listas.detalle(c, ident)
+            elif len(parts) == 3 and parts[2] == "miembros":
+                result = listas.miembros(c, ident, params)
+            else:
+                raise HTTPException(404, "Ruta no encontrada")
+        elif recurso == "plantillas":
+            from app.api import plantillas
+
+            if not ident:
+                result = plantillas.lista(c, params)
+            elif len(parts) == 2:
+                result = plantillas.detalle(c, ident)
+            elif len(parts) == 3 and parts[2] == "para-paso":
+                result = plantillas.para_paso(c, ident)
+            else:
+                raise HTTPException(404, "Ruta no encontrada")
+        elif ruta == "bajas/sincronizacion":
+            from app.integraciones.bajas import resumen as resumen_bajas
+
+            result = resumen_bajas(c)
         elif ruta == "panel/resumen":
             result = uno(c, "SELECT * FROM v_resumen_panel")
         elif recurso == "configuracion" and ident in (
@@ -166,6 +201,11 @@ def leer_secuencias(c: Any, parts: list[str], params: Mapping[str, str]) -> Any:
         "sugerencias",
     ):
         return getattr(sec, accion)(c, ident)
+    if len(parts) == 3 and accion == "envios":
+        from app.api.envios_estado import envios
+
+        obtener(c, "secuencias", ident)
+        return envios(c, sec.campana_de(c, ident))
     raise HTTPException(404, "Ruta no encontrada")
 
 
@@ -268,6 +308,32 @@ def mutacion(
     recurso = p[0]
     ident = p[1] if len(p) > 1 else None
     action = p[2] if len(p) > 2 else None
+    if recurso == "listas":
+        from app.api import listas
+
+        return listas.modificar(c, p, method, body)
+    if recurso == "plantillas":
+        from app.api import plantillas
+
+        return plantillas.modificar(c, p, method, body)
+    if len(p) == 3 and p[:2] == ["contactos", "importacion"] and method == "POST":
+        from app.api import importacion
+
+        if p[2] == "analizar":
+            return importacion.analizar(body)
+        if p[2] == "previsualizar":
+            return importacion.previsualizar(c, body)
+        if p[2] == "confirmar":
+            return {"ok": True, **importacion.confirmar(c, body)}
+        raise HTTPException(404, "Ruta no encontrada")
+    if ruta == "contactos/con-empresa" and method == "POST":
+        return datos.contacto_con_empresa(c, body)
+    if ruta == "empresas/coincidencias" and method == "POST":
+        return datos.coincidencias_empresa(c, body)
+    if recurso == "mensajes" and ident and action == "conciliar" and method == "POST":
+        from app.motor.envios import conciliar_manual
+
+        return conciliar_manual(c, ident, str((body or {}).get("resultado") or ""))
     if recurso == "empresas" and (
         (not ident and method == "POST") or (ident and method == "PATCH" and not action)
     ):
@@ -436,6 +502,8 @@ def escribir_secuencias(c: Any, p: list[str], method: str, body: Any, admin: str
         return sec.guardar_borrador(c, ident, body)
     if accion == "borrador" and method == "PUT" and len(p) == 3:
         return sec.guardar_borrador(c, ident, cuerpo.get("secuencia"))
+    if accion == "audiencia" and method == "PUT" and len(p) == 3:
+        return sec.cambiar_audiencia(c, ident, cuerpo)
     if method != "POST":
         raise HTTPException(404, "Ruta no encontrada")
     if accion == "correos" and len(p) == 5 and p[4] == "mejorar":
@@ -448,7 +516,8 @@ def escribir_secuencias(c: Any, p: list[str], method: str, body: Any, admin: str
         return sec.restaurar(c, ident, numero)
     acciones = {
         "previsualizar": lambda: sec.previsualizar(c, ident, cuerpo),
-        "aprobar": lambda: sec.aprobar_secuencia(c, ident, admin),
+        "aprobar": lambda: sec.aprobar_secuencia(c, ident, admin, cuerpo),
+        "programar": lambda: sec.programar_envios(c, ident),
         "prueba": lambda: sec.prueba(c, ident, cuerpo, admin),
         "otra-version-ia": lambda: sec.otra_version_ia(c, ident, cuerpo, admin),
         "duplicar": lambda: sec.duplicar(c, ident),

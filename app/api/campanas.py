@@ -15,7 +15,6 @@ from app.dominio.reglas import (
 )
 from app.esquemas.entradas import Secuencia
 from app.esquemas.serializar import serializar
-from app.motor.pausas import proximo_al_reanudar
 from app.motor.plantillas import render
 
 
@@ -175,23 +174,26 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
         cam = obtener(c, "campanas", str(p["objetivo_campana_id"]), True)
         seq = obtener(c, "secuencias", str(cam["secuencia_id"]), True)
         if isinstance(v["contenido"], dict) and "pasos" in v["contenido"]:
+            sin_origen = {"pasos": {"__all__": {"plantilla_id"}}}
             propuesta_actual = Secuencia.model_validate(v["contenido"]).model_dump(
-                by_alias=True, exclude_none=True
+                by_alias=True, exclude_none=True, exclude=sin_origen
             )
             secuencia_actual = Secuencia.model_validate(
                 serializar(lecturas.secuencia(c, seq))
-            ).model_dump(by_alias=True, exclude_none=True)
+            ).model_dump(by_alias=True, exclude_none=True, exclude=sin_origen)
             if propuesta_actual != secuencia_actual:
                 guardar_secuencia(c, str(seq["id"]), propuesta_actual, revisar=False)
                 seq = obtener(c, "secuencias", str(seq["id"]), True)
 
-        seg = obtener(c, "segmentos", str(cam["segmento_id"]), True)
+        from app.motor import audiencia
+
+        aud = audiencia.describir(c, cam)
         marca = uno(c, "SELECT * FROM configuracion WHERE clave='marca' FOR UPDATE")
         limits = uno(c, "SELECT valor FROM configuracion WHERE clave='limites'")["valor"]
         s = serializar(lecturas.secuencia(c, seq))
         errors = validar_secuencia(s, marca["valor"]["prohibidas"])
-        if seg["estado"] != "aprobado":
-            errors.append("El segmento requiere aprobación")
+        if aud["bloqueo"]:
+            errors.append(aud["bloqueo"])
         if errors:
             raise HTTPException(400, ". ".join(errors))
         try:
@@ -204,8 +206,9 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
             ) from exc
         congelado = {
             "secuencia": s,
-            "reglas": seg["reglas"],
-            "versionSegmento": seg["version"],
+            "reglas": aud["reglas"],
+            "versionSegmento": aud["segmentoVersion"],
+            "audiencia": {k: aud[k] for k in ("tipo", "id", "nombre", "incorporarNuevos")},
             "marca": marca["valor"],
             "versionMarca": marca["version"],
         }
@@ -216,7 +219,7 @@ def aprobar(c: Conn, p: Row, admin: str) -> None:
                 "campana_id": cam["id"],
                 "propuesta_version_id": v["id"],
                 "version_secuencia": seq["version"],
-                "version_segmento": seg["version"],
+                "version_segmento": aud["segmentoVersion"],
                 "version_marca": marca["version"],
                 "contenido_congelado": Jsonb(congelado),
                 "aprobada_por": admin,
@@ -453,10 +456,11 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
     elif recurso == "campanas" and ident and method == "POST":
         cam = obtener(c, "campanas", ident, True)
         if action == "inscribir":
+            from app.motor import audiencia
+
             if cam["estado"] not in ("aprobada", "activa", "pausada"):
                 raise HTTPException(400, "La campaña requiere aprobación")
-            seg = obtener(c, "segmentos", str(cam["segmento_id"]))
-            candidates = set(lecturas.ids_segmento(c, seg["reglas"]))
+            candidates = set(audiencia.candidatos(c, cam))
             if not isinstance(body, list):
                 raise HTTPException(400, "Envíe una lista de contactos")
             for cid in body:
@@ -464,12 +468,21 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                     cid not in candidates
                     or uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (cid,))["motivo"]
                 ):
-                    raise HTTPException(400, "Contacto no elegible o fuera del segmento")
-                c.execute(
-                    "INSERT INTO inscripciones(campana_id,contacto_id) VALUES(%s,%s) ON CONFLICT(campana_id,contacto_id) DO NOTHING",
-                    (ident, cid),
-                )
+                    raise HTTPException(400, "Contacto no elegible o fuera de la audiencia")
+                if cam["estado"] == "activa":
+                    c.execute(
+                        "INSERT INTO inscripciones(campana_id,contacto_id,estado,proximo_envio) "
+                        "VALUES(%s,%s,'activa',%s) ON CONFLICT(campana_id,contacto_id) DO NOTHING",
+                        (ident, cid, datos.ahora()),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO inscripciones(campana_id,contacto_id) VALUES(%s,%s) ON CONFLICT(campana_id,contacto_id) DO NOTHING",
+                        (ident, cid),
+                    )
         elif action == "reanudar":
+            from app.motor import audiencia
+
             a = uno(
                 c,
                 "SELECT * FROM aprobaciones_campana WHERE id=%s AND revocada_en IS NULL",
@@ -488,31 +501,10 @@ def modificar(c: Conn, p: list[str], method: str, body: Any, admin: str) -> Any:
                     "La ventana de envío aprobada no coincide con el horario global "
                     "(Configuración → Límites y horarios). Ajuste uno de los dos antes de reanudar.",
                 )
-            actualizar(c, "campanas", ident, {"estado": "activa"})
-            seg = obtener(c, "segmentos", str(cam["segmento_id"]))
-            ids = set(lecturas.ids_segmento(c, seg["reglas"]))
-            ahora = datos.ahora()
-            for ins in todos(
-                c,
-                "SELECT * FROM inscripciones WHERE campana_id=%s AND motivo_salida IS NULL",
-                (ident,),
-            ):
-                cid = str(ins["contacto_id"])
-                if (
-                    cid in ids
-                    and uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (cid,))["motivo"] is None
-                ):
-                    actualizar(
-                        c,
-                        "inscripciones",
-                        str(ins["id"]),
-                        {
-                            "estado": "activa",
-                            "proximo_envio": proximo_al_reanudar(
-                                c, ins, congelada, limits["ventana"], ahora
-                            ),
-                        },
-                    )
+            r = audiencia.activar(c, ident, datos.ahora(), "reanudar_campana")
+            if not r["activada"]:
+                raise HTTPException(400, r["motivo"])
+            return {"ok": True, "programacion": r}
         elif action in ("pausar", "detener"):
             stop = action == "detener"
             actualizar(c, "campanas", ident, {"estado": "finalizada" if stop else "pausada"})

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
 from uuid import uuid4
 
+from fastapi import HTTPException
 from psycopg import errors
 
 from app.api import datos, lecturas
@@ -22,7 +23,6 @@ from app.db import (
 )
 from app.dominio.reglas import BOGOTA, VentanaIncompatible, siguiente_ventana
 from app.esquemas.serializar import serializar
-from app.integraciones.conexiones import pausar_todo
 from app.integraciones.gmail import Gmail, GmailReal, message_id, mime
 from app.motor.pausas import pausar_campana
 from app.motor.plantillas import render
@@ -86,6 +86,10 @@ def programar(reloj: Reloj | None = None, proveedor: Gmail | None = None) -> Non
             return
         gmail = proveedor or GmailReal(c)
         lim = limites(c)
+        from app.motor.audiencia import incorporar_nuevos
+
+        with c.transaction():
+            incorporar_nuevos(c, now)
         for ins in todos(
             c,
             "SELECT i.* FROM inscripciones i JOIN campanas ca ON ca.id=i.campana_id WHERE i.estado='activa' AND ca.estado='activa' AND i.proximo_envio<=%s ORDER BY i.proximo_envio FOR UPDATE OF i SKIP LOCKED",
@@ -164,7 +168,7 @@ def programar_inscripcion(c: Conn, ins: Row, now: datetime, gmail: Gmail, lim: R
     )
     mid = str(canceled["id"]) if canceled else str(uuid4())
     ref = secrets.token_urlsafe(24)
-    baja = config().app_url + "/baja/" + firma_baja().dumps(mid)
+    baja = config().url_baja(firma_baja().dumps(mid))
     e = serializar(lecturas.empresa(c, obtener(c, "empresas", str(ct["empresa_id"]))))
     rendered = render(
         seq,
@@ -250,28 +254,11 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                     gmail.buscar(m["clave_idempotencia"]) if m["estado"] == "enviando" else None
                 )
                 if m["estado"] == "enviando" and recovered is None:
-                    # Gmail search is eventually consistent; an absent result is not proof of no delivery.
-                    pausar_todo(
-                        c, "Envío con resultado incierto: concilie Gmail antes de reintentar"
-                    )
-                    actualizar(
-                        c,
-                        "mensajes",
-                        ident,
-                        {"ultimo_error": "Resultado incierto: requiere conciliación manual"},
-                    )
-                    auditar(c, "envio_incierto", "mensajes", ident)
-                    from app.notificaciones import notificar_responsables
-
-                    notificar_responsables(
-                        c,
-                        "tarea_fallida",
-                        "Envío con resultado incierto",
-                        "Un envío quedó sin confirmación de Gmail y los envíos se pausaron. "
-                        "Concilie en Gmail si el correo salió antes de reanudar las campañas.",
-                        "/campanas",
-                        f"envio_incierto:{ident}",
-                    )
+                    # Gmail pudo aceptar el correo antes de que el proceso se cayera y su
+                    # búsqueda tarda en reflejarlo: una ausencia no prueba que no salió.
+                    # Nunca se reenvía a ciegas; queda para conciliación (automática con
+                    # «conciliar_envios» o manual desde la secuencia).
+                    marcar_conciliacion(c, m)
                     return
                 if not recovered:
                     lim = limites(c)
@@ -371,7 +358,9 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                         )
                         if prevrow:
                             prev = message_id(prevrow["clave_idempotencia"])
-                em = mime(m, marca, config().app_url + "/baja/" + firma_baja().dumps(ident), prev)
+                em = mime(m, marca, config().url_baja(firma_baja().dumps(ident)), prev)
+            if not recovered and not puede_entregarse(c, m):
+                return
             try:
                 result = recovered or gmail.enviar(em, m["gmail_thread_id"])
             except Exception as exc:
@@ -407,13 +396,18 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
                                 },
                             )
                         elif exc.resp.status in (400, 403, 404):
+                            from app.integraciones.errores_google import explicar
+
                             actualizar(
                                 c,
                                 "mensajes",
                                 ident,
                                 {
                                     "estado": "fallido",
-                                    "ultimo_error": "Gmail rechazó el mensaje; revise destinatario y permisos",
+                                    "ultimo_error": (
+                                        explicar(exc, "Gmail")
+                                        or "Gmail rechazó el mensaje; revise destinatario y permisos"
+                                    )[:300],
                                 },
                             )
                             detail = str(exc).lower()
@@ -430,71 +424,188 @@ def enviar(ident: str, reloj: Reloj | None = None, proveedor: Gmail | None = Non
 
             with c.transaction():
                 c.execute("SELECT set_config('nexus.actor','proceso:motor_secuencias',true)")
-                actualizar(
-                    c,
-                    "mensajes",
-                    ident,
-                    {
-                        "estado": "enviado",
-                        "enviado_en": now,
-                        "gmail_message_id": result["id"],
-                        "gmail_thread_id": result["threadId"],
-                    },
-                )
-                if m["tipo"] == "secuencia":
-                    ins = obtener(c, "inscripciones", str(m["inscripcion_id"]), True)
-                    frozen = obtener(c, "aprobaciones_campana", str(m["aprobacion_id"]))[
-                        "contenido_congelado"
-                    ]
-                    seq = frozen["secuencia"]
-                    nextstep = next(
-                        (p for p in seq["pasos"] if p["orden"] == m["paso_orden"] + 1), None
-                    )
-                    if ins["estado"] == "activa":
-                        if nextstep:
-                            try:
-                                nxt = siguiente_ventana(
-                                    now,
-                                    seq["ventanaEnvio"],
-                                    limites(c)["ventana"],
-                                    nextstep["esperaDiasHabiles"],
-                                )
-                                actualizar(
-                                    c,
-                                    "inscripciones",
-                                    str(ins["id"]),
-                                    {"paso_actual": nextstep["orden"], "proximo_envio": nxt},
-                                )
-                            except VentanaIncompatible:
-                                # El correo ya salió: se registra como enviado y solo se pausa
-                                # la campaña, conservando el paso siguiente para reanudar.
-                                actualizar(
-                                    c,
-                                    "inscripciones",
-                                    str(ins["id"]),
-                                    {
-                                        "paso_actual": nextstep["orden"],
-                                        "proximo_envio": None,
-                                        "estado": "pausada",
-                                    },
-                                )
-                                pausar_campana(c, str(ins["campana_id"]))
-                        else:
-                            actualizar(
-                                c,
-                                "inscripciones",
-                                str(ins["id"]),
-                                {
-                                    "estado": "finalizada",
-                                    "motivo_salida": "completada",
-                                    "finalizada_en": now,
-                                    "proximo_envio": None,
-                                },
-                            )
-                    datos.avanzar(c, m["contacto_id"], "contactado", "primer_envio")
-                auditar(c, "correo_enviado", "mensajes", ident)
+                registrar_enviado(c, m, result, now)
         finally:
             c.rollback()
             c.execute("SELECT pg_advisory_unlock(hashtextextended(%s,1))", (ident,))
             c.execute("SELECT pg_advisory_unlock(70719)")
             c.commit()
+
+
+def registrar_enviado(c: Conn, m: Row, result: dict[str, str], now: datetime) -> None:
+    """Gmail aceptó el mensaje: se guarda como enviado y la inscripción pasa al paso
+    siguiente según su espera en días hábiles, ventana y horario."""
+    ident = str(m["id"])
+    actualizar(
+        c,
+        "mensajes",
+        ident,
+        {
+            "estado": "enviado",
+            "enviado_en": now,
+            "gmail_message_id": result["id"],
+            "gmail_thread_id": result["threadId"],
+            "ultimo_error": None,
+            "conciliacion": "enviado" if m.get("conciliacion") == "pendiente" else None,
+        },
+    )
+    if m["tipo"] == "secuencia":
+        ins = obtener(c, "inscripciones", str(m["inscripcion_id"]), True)
+        frozen = obtener(c, "aprobaciones_campana", str(m["aprobacion_id"]))["contenido_congelado"]
+        seq = frozen["secuencia"]
+        nextstep = next((p for p in seq["pasos"] if p["orden"] == m["paso_orden"] + 1), None)
+        if ins["estado"] == "activa" and ins["paso_actual"] == m["paso_orden"]:
+            if nextstep:
+                try:
+                    nxt = siguiente_ventana(
+                        now,
+                        seq["ventanaEnvio"],
+                        limites(c)["ventana"],
+                        nextstep["esperaDiasHabiles"],
+                    )
+                    actualizar(
+                        c,
+                        "inscripciones",
+                        str(ins["id"]),
+                        {"paso_actual": nextstep["orden"], "proximo_envio": nxt},
+                    )
+                except VentanaIncompatible:
+                    # El correo ya salió: se registra como enviado y solo se pausa
+                    # la campaña, conservando el paso siguiente para reanudar.
+                    actualizar(
+                        c,
+                        "inscripciones",
+                        str(ins["id"]),
+                        {
+                            "paso_actual": nextstep["orden"],
+                            "proximo_envio": None,
+                            "estado": "pausada",
+                        },
+                    )
+                    pausar_campana(c, str(ins["campana_id"]))
+            else:
+                actualizar(
+                    c,
+                    "inscripciones",
+                    str(ins["id"]),
+                    {
+                        "estado": "finalizada",
+                        "motivo_salida": "completada",
+                        "finalizada_en": now,
+                        "proximo_envio": None,
+                    },
+                )
+        elif ins["paso_actual"] == m["paso_orden"] and ins["estado"] == "pausada" and nextstep:
+            # Pausada mientras salía: conserva el avance para reanudar desde el paso siguiente.
+            actualizar(c, "inscripciones", str(ins["id"]), {"paso_actual": nextstep["orden"]})
+        datos.avanzar(c, m["contacto_id"], "contactado", "primer_envio")
+    auditar(c, "correo_enviado", "mensajes", ident)
+
+
+CONCILIAR = "Resultado incierto: Gmail pudo aceptarlo; requiere conciliación (no se reenvía solo)"
+
+
+def marcar_conciliacion(c: Conn, m: Row) -> None:
+    ident = str(m["id"])
+    if m.get("conciliacion") == "pendiente":
+        return
+    actualizar(c, "mensajes", ident, {"ultimo_error": CONCILIAR, "conciliacion": "pendiente"})
+    auditar(c, "envio_incierto", "mensajes", ident)
+    from app.notificaciones import notificar_responsables
+
+    notificar_responsables(
+        c,
+        "tarea_fallida",
+        "Envío con resultado incierto",
+        "Un correo quedó sin confirmación de Gmail. NEXUS no lo reenviará solo: lo buscará "
+        "de nuevo en Gmail y, si no aparece, decida en la secuencia si salió o no.",
+        "/secuencias",
+        f"envio_incierto:{ident}",
+    )
+
+
+def puede_entregarse(c: Conn, m: Row) -> bool:
+    """Última comprobación inmediatamente antes de entregar el mensaje a Gmail.
+
+    Lee la supresión y la elegibilidad con una consulta nueva (ya confirmado «enviando»):
+    una baja registrada en ese instante cancela el envío en lugar de dejarlo salir.
+    """
+    with c.transaction():
+        c.execute("SELECT set_config('nexus.actor','proceso:motor_secuencias',true)")
+        if m["tipo"] == "secuencia":
+            motivo = uno(c, "SELECT motivo_no_elegible(%s) AS motivo", (m["contacto_id"],))[
+                "motivo"
+            ]
+        else:
+            motivo = (
+                "Contacto suprimido o excluido"
+                if uno(c, "SELECT contacto_bloqueado(%s) AS b", (m["contacto_id"],))["b"]
+                else None
+            )
+        if motivo:
+            c.execute(
+                "UPDATE mensajes SET estado='cancelado',ultimo_error=%s WHERE id=%s",
+                (("Cancelado antes de entregar a Gmail: " + motivo)[:300], m["id"]),
+            )
+            return False
+    return True
+
+
+def conciliar_pendientes(proveedor: Gmail | None = None, reloj: Reloj | None = None) -> int:
+    """Busca otra vez en Gmail los envíos inciertos (tarea «conciliar_envios»).
+
+    Si Gmail tiene el mensaje (por Message-ID o encabezado de idempotencia) se registra
+    como enviado. Si no, sigue pendiente para la decisión manual; nunca se reenvía solo.
+    """
+    now = (reloj or RelojReal()).ahora()
+    resueltos = 0
+    with transaccion("proceso:motor_secuencias", accion="conciliar_envios") as c:
+        if obtener(c, "integraciones", "gmail")["estado"] != "conectada":
+            return 0
+        gmail = proveedor or GmailReal(c)
+        for m in todos(
+            c,
+            "SELECT * FROM mensajes WHERE estado='enviando' AND conciliacion='pendiente' "
+            "ORDER BY creado_en LIMIT 50 FOR UPDATE SKIP LOCKED",
+        ):
+            encontrado = gmail.buscar(m["clave_idempotencia"])
+            if encontrado:
+                with c.transaction():
+                    registrar_enviado(c, m, encontrado, now)
+                resueltos += 1
+    return resueltos
+
+
+def conciliar_manual(c: Conn, ident: str, resultado: str) -> dict[str, object]:
+    """Decisión del administrador sobre un envío incierto.
+
+    - «enviado»: lo encontró en Enviados de Gmail; se registra sin reenviar.
+    - «no_enviado»: confirmó que no salió; se cancela y la inscripción vuelve a programarse
+      con la misma clave de idempotencia (mismo Message-ID).
+    """
+    m = obtener(c, "mensajes", ident, True)
+    if m["estado"] != "enviando" or m.get("conciliacion") != "pendiente":
+        raise HTTPException(409, "Este mensaje no está pendiente de conciliación")
+    if resultado == "enviado":
+        registrar_enviado(
+            c,
+            m,
+            {"id": "conciliado-manual:" + ident, "threadId": m["gmail_thread_id"] or ""},
+            datos.ahora(),
+        )
+        actualizar(c, "mensajes", ident, {"conciliacion": "enviado"})
+    elif resultado == "no_enviado":
+        c.execute(
+            "UPDATE mensajes SET estado='cancelado',conciliacion='no_enviado',"
+            "ultimo_error='Conciliado: no salió; se programará de nuevo' WHERE id=%s",
+            (ident,),
+        )
+        if m["tipo"] == "secuencia":
+            c.execute(
+                "UPDATE inscripciones SET proximo_envio=%s WHERE id=%s AND estado='activa'",
+                (datos.ahora(), m["inscripcion_id"]),
+            )
+    else:
+        raise HTTPException(400, "Indique si el correo salió (enviado) o no (no_enviado)")
+    auditar(c, "conciliar_envio_" + resultado, "mensajes", ident)
+    return {"ok": True}

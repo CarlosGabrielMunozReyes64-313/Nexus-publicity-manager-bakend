@@ -70,6 +70,8 @@ class Paso(Entrada):
     # «texto» (recomendado) o «html»; en «html», `cuerpo` es la versión en texto simple.
     formato: Literal["texto", "html"] = "texto"
     cuerpo_html: str | None = None
+    # Plantilla de la que se copió el contenido (solo referencia: el contenido es la copia).
+    plantilla_id: str | None = None
 
 
 class Secuencia(Entrada):

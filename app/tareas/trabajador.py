@@ -120,6 +120,22 @@ def manejar(t: db.Row) -> None:
 
         enviar(data["mensajeId"])
         return
+    if tipo == "conciliar_envios":
+        from app.motor.envios import conciliar_pendientes
+
+        conciliar_pendientes()
+        return
+    if tipo == "sincronizar_bajas":
+        from app.integraciones.bajas import sincronizar as sincronizar_bajas
+        from app.tareas.bitacora import anotar
+
+        r = sincronizar_bajas()
+        if r.get("error"):
+            # La baja ya surtió efecto en la base principal; solo falta la copia.
+            anotar(f"Copiar bajas a la base secundaria: {r['error']}. Se reintentará.", "aviso")
+        elif r.get("copiadas"):
+            anotar(f"Bajas copiadas a la base secundaria: {r['copiadas']}.", "exito")
+        return
     if tipo == "calcular_puntajes":
         from app.dominio.calidad import calcular_lote
 
@@ -211,6 +227,7 @@ SERVICIOS_GOOGLE = {
     "sincronizar_gmail": "Gmail",
     "enviar_mensaje": "Gmail",
     "programar_envios": "Gmail",
+    "conciliar_envios": "Gmail",
     "sincronizar_ga4": "Google Analytics",
     "sincronizar_search_console": "Search Console",
 }

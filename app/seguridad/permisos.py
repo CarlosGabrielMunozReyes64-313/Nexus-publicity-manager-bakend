@@ -21,6 +21,8 @@ PANTALLAS_ADMIN = (
     "empresas",
     "descubrimiento",
     "segmentos",
+    "listas",
+    "plantillas",
     "secuencias",
     "campanas",
     "respuestas",

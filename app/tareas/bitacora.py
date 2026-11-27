@@ -16,7 +16,13 @@ log = structlog.get_logger()
 NIVELES = ("info", "exito", "aviso", "error")
 # Tareas que corren cada minuto: solo se anotan si fallan, para que la terminal no se llene
 # de ruido.
-RUTINARIAS = {"programar_envios", "sincronizar_gmail", "liberar_tareas_colgadas"}
+RUTINARIAS = {
+    "programar_envios",
+    "sincronizar_gmail",
+    "liberar_tareas_colgadas",
+    "sincronizar_bajas",
+    "conciliar_envios",
+}
 NOMBRES = {
     "descubrir_empresas": "Búsqueda de empresas",
     "enriquecer_empresa": "Investigar empresa",
@@ -29,6 +35,8 @@ NOMBRES = {
     "verificar_correo": "Verificar un correo",
     "enviar_mensaje": "Enviar un correo programado",
     "programar_envios": "Programar envíos",
+    "conciliar_envios": "Conciliar envíos inciertos con Gmail",
+    "sincronizar_bajas": "Copiar bajas a la base secundaria",
     "sincronizar_gmail": "Revisar respuestas en Gmail",
     "liberar_tareas_colgadas": "Liberar tareas colgadas",
     "sincronizar_ga4": "Sincronizar Google Analytics",

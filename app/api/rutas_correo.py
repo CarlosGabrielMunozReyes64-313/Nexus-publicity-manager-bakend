@@ -146,13 +146,17 @@ def resumen_elegibles(c: Conn, ids: list[str]) -> dict[str, Any]:
     }
 
 
-def reglas_sin_ids(reglas: list[dict[str, str]]) -> list[dict[str, Any]]:
+def reglas_sin_ids(reglas: list[Any]) -> list[dict[str, Any]]:
     """Las reglas por lista de contactos se resumen: el agente no recibe identificadores."""
     out: list[dict[str, Any]] = []
     for r in reglas:
-        if r.get("campo") == "contactoIds":
+        if "grupo" in r:
+            out.append({"grupo": r["grupo"], "reglas": reglas_sin_ids(r["reglas"])})
+        elif r.get("campo") in ("contactoIds", "lista"):
             out.append(
                 {"campo": "contactos_elegidos_a_mano", "cantidad": len(r["valor"].split(","))}
+                if r["campo"] == "contactoIds"
+                else {"campo": "miembros_de_una_lista"}
             )
         else:
             out.append(dict(r))
@@ -356,17 +360,35 @@ def segmentos_para_ruta(c: Conn) -> list[Row]:
 # ---------------------------------------------------------------------- revisión
 
 
+def audiencia_resumen(c: Conn, cam: Row) -> Row:
+    """La audiencia de la campaña con la forma de «segmento» que esperan las pantallas."""
+    from app.motor import audiencia
+
+    aud = audiencia.describir(c, cam)
+    return {
+        "id": aud["id"],
+        "nombre": aud["nombre"],
+        "estado": "aprobado" if not aud["bloqueo"] else aud.get("estadoSegmento", "propuesto"),
+        "version": aud["segmentoVersion"],
+        "reglas": aud["reglas"],
+        "tipo": aud["tipo"],
+        "bloqueo": aud["bloqueo"],
+    }
+
+
 def _segmento_de(c: Conn, p: Row) -> tuple[Row, Row]:
     cam = obtener(c, "campanas", str(p["objetivo_campana_id"]))
-    return cam, obtener(c, "segmentos", str(cam["segmento_id"]))
+    return cam, audiencia_resumen(c, cam)
 
 
 def elegibles_de(c: Conn, p: Row, limite: int = 50) -> list[Row]:
     """Contactos elegibles del segmento de la ruta, para elegir uno en la vista previa."""
     if p["tipo"] != "campana":
         raise HTTPException(400, "Solo las rutas de correo tienen contactos elegibles")
-    _, seg = _segmento_de(c, p)
-    ids = elegibles_ids(c, seg["reglas"])[:limite]
+    from app.motor import audiencia
+
+    cam, _ = _segmento_de(c, p)
+    ids = audiencia.elegibles(c, cam)[:limite]
     if not ids:
         return []
     return todos(
@@ -450,13 +472,15 @@ def revision(c: Conn, p: Row, version: Row | None = None) -> dict[str, Any]:
             errores.append("Ventana de envío inválida")
         advertencias.extend(advertencias_de(s))
         duracion = sum(x["esperaDiasHabiles"] for x in s["pasos"])
-    if seg["estado"] != "aprobado":
-        bloqueos.append(SEGMENTO_SIN_APROBAR)
+    if seg["bloqueo"]:
+        bloqueos.append(seg["bloqueo"])
     if uno(c, "SELECT archivada_en FROM secuencias WHERE id=%s", (cam["secuencia_id"],))[
         "archivada_en"
     ]:
         bloqueos.append(SECUENCIA_ARCHIVADA)
-    ids = elegibles_ids(c, seg["reglas"])
+    from app.motor import audiencia
+
+    ids = audiencia.elegibles(c, cam)
     if s is not None and ids:
         usadas = {
             m

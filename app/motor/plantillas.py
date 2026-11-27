@@ -2,6 +2,43 @@ import re
 from html import escape
 from typing import Any, Callable
 
+# Variables que NEXUS sabe reemplazar. Un paso también puede declarar las suyas en
+# «variables» (con campo fuente y respaldo).
+VARIABLES_DATOS = ("nombre", "cargo", "empresa", "municipio", "senal")
+VARIABLES_SISTEMA = ("firma", "baja", "enlace")
+VARIABLES_ADMITIDAS = VARIABLES_DATOS + VARIABLES_SISTEMA
+ETIQUETA_BAJA = "Rechazar / Darme de baja"
+
+
+def variables_de(*textos: str | None) -> list[str]:
+    vistas: list[str] = []
+    for t in textos:
+        for m in re.findall(r"\{\{\s*(\w+)\s*\}\}", t or ""):
+            if m not in vistas:
+                vistas.append(m)
+    return vistas
+
+
+def variables_no_admitidas(secuencia: dict[str, Any]) -> list[str]:
+    """Errores «Correo N: variable {{x}} no admitida» (se envían en blanco si no)."""
+    errores = []
+    for i, p in enumerate(secuencia.get("pasos", []), 1):
+        propias = {v.get("nombre") for v in p.get("variables", []) if isinstance(v, dict)}
+        for var in variables_de(p.get("asunto"), p.get("cuerpo"), p.get("cuerpoHtml")):
+            if var not in VARIABLES_ADMITIDAS and var not in propias:
+                errores.append(
+                    f"Correo {i}: la variable {{{{{var}}}}} no existe en NEXUS "
+                    f"(admitidas: {', '.join('{{' + x + '}}' for x in VARIABLES_ADMITIDAS)})"
+                )
+    return errores
+
+
+def con_pie_de_baja(cuerpo: str, html: bool = False) -> str:
+    """Garantiza el enlace de baja aunque la plantilla haya omitido el pie."""
+    if "{{baja}}" in cuerpo:
+        return cuerpo
+    return cuerpo + ("<p>{{baja}}</p>" if html else "\n\n{{baja}}")
+
 
 def _enlace(url: str) -> str:
     """Enlace visible; en vistas previas y pruebas (sin URL real) solo el texto."""
@@ -28,7 +65,13 @@ def _html(
         if m[1] == "enlace":
             return _enlace(enlace)
         if m[1] == "baja":
-            return escape(texto_baja, quote=True).replace("\n", "<br>") + "<br>" + _enlace(baja_url)
+            u = escape(baja_url, quote=True)
+            enlace_baja = (
+                f'<a href="{u}">{ETIQUETA_BAJA}</a>'
+                if baja_url.startswith(("https://", "http://"))
+                else f"{ETIQUETA_BAJA}: {u}"
+            )
+            return escape(texto_baja, quote=True).replace("\n", "<br>") + "<br>" + enlace_baja
         return escape(reemplazar(m), quote=True).replace("\n", "<br>")
 
     return re.sub(r"\{\{(\w+)\}\}", valor, cuerpo)
@@ -52,7 +95,11 @@ def render(
         "municipio": empresa.get("municipio"),
         "senal": next((s["descripcion"] for s in empresa.get("senales", [])), None),
     }
-    sistema = {"firma": marca["firma"], "baja": marca["baja"] + "\n" + baja_url, "enlace": enlace}
+    sistema = {
+        "firma": marca["firma"],
+        "baja": marca["baja"] + "\n" + ETIQUETA_BAJA + ": " + baja_url,
+        "enlace": enlace,
+    }
     defaults = {
         "nombre": "equipo",
         "empresa": "su empresa",
@@ -80,10 +127,19 @@ def render(
                 respaldo.append(key)
             return str(variables.get(key, {}).get("respaldo", defaults.get(key, "")))
 
-        p = {**paso, "cuerpo": re.sub(r"\{\{(\w+)\}\}", reemplazar, paso["cuerpo"])}
+        p = {
+            **paso,
+            "cuerpo": re.sub(r"\{\{(\w+)\}\}", reemplazar, con_pie_de_baja(paso["cuerpo"])),
+        }
         if paso.get("asunto"):
             p["asunto"] = re.sub(r"\{\{(\w+)\}\}", reemplazar, paso["asunto"])
         if paso.get("formato") == "html" and paso.get("cuerpoHtml"):
-            p["cuerpoHtml"] = _html(paso["cuerpoHtml"], reemplazar, enlace, marca["baja"], baja_url)
+            p["cuerpoHtml"] = _html(
+                con_pie_de_baja(paso["cuerpoHtml"], html=True),
+                reemplazar,
+                enlace,
+                marca["baja"],
+                baja_url,
+            )
         pasos.append(p)
     return {"pasos": pasos, "respaldo": respaldo}

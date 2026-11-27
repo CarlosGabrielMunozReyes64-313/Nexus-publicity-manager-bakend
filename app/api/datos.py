@@ -453,3 +453,90 @@ def fusionar(c: Conn, ident: str, body: Row, admin: str) -> None:
             "resuelto_en": ahora(),
         },
     )
+
+
+# ---------------------------------------------------------------- contacto con empresa
+
+
+def coincidencias_empresa(c: Conn, body: Any) -> list[Row]:
+    """Empresas existentes que podrían ser la misma (NIT, dominio o nombre parecido)."""
+    from rapidfuzz import fuzz
+
+    from app.dominio.reglas import normalizar_nombre
+
+    body = body if isinstance(body, dict) else {}
+    nombre = normalizar_nombre(str(body.get("razonSocial") or ""))
+    nit = str(body.get("nit") or "").strip()
+    sitio = str(body.get("sitioWeb") or "").strip()
+    dom = dominio(sitio) if sitio else ""
+    out: dict[str, Row] = {}
+    for e in todos(
+        c,
+        "SELECT id,razon_social,municipio,nit,dominio::text AS dominio FROM empresas "
+        "WHERE fusionada_en_id IS NULL",
+    ):
+        motivo = None
+        if nit and e["nit"] and e["nit"].strip() == nit:
+            motivo = "Mismo NIT"
+        elif dom and e["dominio"] and e["dominio"].lower() == dom:
+            motivo = "Mismo dominio"
+        elif nombre and len(nombre) >= 3:
+            n2 = normalizar_nombre(e["razon_social"])
+            if n2 == nombre:
+                motivo = "Mismo nombre"
+            elif fuzz.ratio(n2, nombre) >= 90:
+                motivo = "Nombre muy parecido"
+        if motivo:
+            out[str(e["id"])] = {
+                "id": e["id"],
+                "razonSocial": e["razon_social"],
+                "municipio": e["municipio"],
+                "motivo": motivo,
+                "exacta": motivo in ("Mismo NIT", "Mismo dominio"),
+            }
+    return list(out.values())[:10]
+
+
+def contacto_con_empresa(c: Conn, body: Any) -> dict[str, Any]:
+    """POST /contactos/con-empresa: crea el contacto y, si hace falta, su empresa.
+
+    Todo ocurre en la transacción de la petición: si el contacto no se puede guardar (correo
+    repetido, dato inválido) tampoco queda la empresa ni ninguna asociación.
+    """
+    body = body if isinstance(body, dict) else {}
+    contacto_body = body.get("contacto")
+    if not isinstance(contacto_body, dict):
+        raise HTTPException(400, "Faltan los datos del contacto")
+    empresa_id = body.get("empresaId")
+    nueva = body.get("empresaNueva")
+    if bool(empresa_id) == bool(nueva):
+        raise HTTPException(400, "Elija una empresa existente o cree una nueva")
+    creada = False
+    if nueva:
+        if not isinstance(nueva, dict) or not str(nueva.get("razonSocial") or "").strip():
+            raise HTTPException(400, "Escriba la razón social de la empresa nueva")
+        parecidas = coincidencias_empresa(c, nueva)
+        exacta = next((p for p in parecidas if p["exacta"]), None)
+        if exacta:
+            raise HTTPException(
+                409,
+                f"{exacta['motivo']} que «{exacta['razonSocial']}»: elija esa empresa en lugar "
+                "de crear otra",
+            )
+        if parecidas and not body.get("confirmarEmpresaNueva"):
+            p = parecidas[0]
+            raise HTTPException(
+                409,
+                f"Ya existe una empresa parecida: «{p['razonSocial']}» ({p['municipio'] or 'sin municipio'}). "
+                "Elíjala o confirme que es una empresa distinta",
+            )
+        e = guardar_empresa(c, {"municipio": "", **nueva})
+        empresa_id = str(e["id"])
+        creada = True
+    else:
+        e = obtener(c, "empresas", str(empresa_id))
+        if e["fusionada_en_id"]:
+            raise HTTPException(400, "Esa empresa se fusionó con otra; elija la principal")
+    r = guardar_contacto(c, {**contacto_body, "empresaId": empresa_id})
+    auditar(c, "crear_contacto_con_empresa", "contactos", str(r["id"]))
+    return {"ok": True, "id": str(r["id"]), "empresaId": empresa_id, "empresaCreada": creada}

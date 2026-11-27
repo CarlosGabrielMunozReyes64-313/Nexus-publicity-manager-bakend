@@ -409,7 +409,7 @@ def test_vista_previa_sin_guardar_y_envio_de_prueba(auth, sin_gmail, monkeypatch
     assert m["To"] == config().admin_correo
     assert m["Subject"] == "[Prueba] Diagnóstico gratuito"
     texto = m.get_body(preferencelist=("plain",)).get_content()
-    assert "texto aún sin guardar" in texto and "\n#" in texto and "/r/" not in texto
+    assert "texto aún sin guardar" in texto and "Darme de baja: #" in texto and "/r/" not in texto
     with transaccion("admin") as c:
         assert uno(c, "SELECT count(*) AS n FROM mensajes")["n"] == mensajes_antes
         usadas = uno(c, "SELECT count(*) AS n FROM registro_auditoria WHERE accion='envio_prueba'")[

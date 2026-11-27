@@ -31,9 +31,10 @@ COPY --from=wheels /wheels /wheels
 RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels && useradd --uid 10001 --create-home nexus
 COPY app ./app
 COPY migraciones ./migraciones
+COPY migraciones_bajas ./migraciones_bajas
 COPY scripts ./scripts
 COPY sql ./sql
-COPY alembic.ini Procfile ./
+COPY alembic.ini alembic_bajas.ini Procfile ./
 COPY --from=web /web/dist ./frontend/dist
 USER nexus
 EXPOSE 8000

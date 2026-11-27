@@ -12,6 +12,12 @@ class Config(BaseSettings):
     app_env: Literal["development", "production"] = "production"
     app_url: str
     database_url: SecretStr
+    # Base secundaria de bajas (p. ej. Postgres-3qtE). Vacía: las bajas se aplican igual en
+    # la base principal y quedan pendientes de sincronizar hasta que se configure.
+    unsubscribe_database_url: SecretStr = SecretStr("")
+    # Origen público de los enlaces de baja (sin ruta). Vacío: APP_URL. Debe llegar a
+    # /baja/* del backend sin iniciar sesión (en Vercel, la reescritura /baja/:path*).
+    baja_url_publica: str = ""
     clave_cifrado: SecretStr
     sesion_secreto: SecretStr
     admin_correo: str
@@ -59,6 +65,11 @@ class Config(BaseSettings):
         if len(self.sesion_secreto.get_secret_value()) < 32:
             raise ValueError("SESION_SECRETO requiere al menos 32 caracteres")
         self.app_url = self.app_url.rstrip("/")
+        self.baja_url_publica = self.baja_url_publica.strip().rstrip("/")
+        if self.baja_url_publica:
+            b = urlsplit(self.baja_url_publica)
+            if b.path or b.query or b.fragment or b.scheme not in ("http", "https"):
+                raise ValueError("BAJA_URL_PUBLICA debe ser un origen sin ruta")
         u = urlsplit(self.app_url)
         if u.path or u.query or u.fragment or u.scheme not in ("http", "https"):
             raise ValueError("APP_URL debe ser un origen sin ruta")
@@ -70,6 +81,9 @@ class Config(BaseSettings):
         if self.tasa_cop_por_usd <= 0:
             raise ValueError("TASA_COP_POR_USD debe ser positiva")
         return self
+
+    def url_baja(self, token: str) -> str:
+        return (self.baja_url_publica or self.app_url) + "/baja/" + token
 
 
 @lru_cache

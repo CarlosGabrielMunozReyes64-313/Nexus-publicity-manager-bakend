@@ -22,7 +22,30 @@ ETAPAS = [
     "cliente",
     "postventa",
 ]
-CAMPOS = {"municipio", "sector", "tamano", "puntaje", "etapa", "origen", "baseLegal", "contactoIds"}
+CAMPOS = {
+    # Atributos guardados en NEXUS.
+    "municipio",
+    "sector",
+    "tamano",
+    "puntaje",
+    "etapa",
+    "origen",
+    "baseLegal",
+    "contactoIds",
+    "cargo",
+    "estadoCorreo",
+    "estadoCuenta",
+    "dominioCorreo",
+    "lista",
+    # Comportamientos respaldados por eventos registrados (valor «si» o «no»).
+    "hizoClic",
+    "respondio",
+    "recibioCorreo",
+}
+COMPORTAMIENTOS = {"hizoClic", "respondio", "recibioCorreo"}
+OPERADORES = ("es", "no_es", "contiene", "mayor_que", "menor_que")
+MAX_PROFUNDIDAD = 3
+MAX_REGLAS = 60
 
 
 def normalizar_nombre(s: str) -> str:
@@ -40,18 +63,53 @@ def telefono(s: str) -> str:
     return ("+" if s.startswith("+") else "+57") + re.sub(r"\D", "", s)
 
 
-def reglas_validas(reglas: Any) -> list[dict[str, str]]:
+def _regla_valida(r: Any, profundidad: int, cuenta: list[int]) -> None:
+    cuenta[0] += 1
+    if cuenta[0] > MAX_REGLAS:
+        raise HTTPException(400, f"Un segmento admite hasta {MAX_REGLAS} reglas")
+    if isinstance(r, dict) and "grupo" in r:
+        if (
+            r.get("grupo") not in ("y", "o")
+            or not isinstance(r.get("reglas"), list)
+            or not r["reglas"]
+            or profundidad >= MAX_PROFUNDIDAD
+        ):
+            raise HTTPException(400, "Grupo de reglas no válido")
+        for x in r["reglas"]:
+            _regla_valida(x, profundidad + 1, cuenta)
+        return
+    if (
+        not isinstance(r, dict)
+        or r.get("campo") not in CAMPOS
+        or r.get("operador") not in OPERADORES
+        or not isinstance(r.get("valor"), str)
+    ):
+        raise HTTPException(400, "Regla de segmento no válida")
+    if r["campo"] in COMPORTAMIENTOS and (
+        r["operador"] not in ("es", "no_es") or r["valor"] not in ("si", "no")
+    ):
+        raise HTTPException(400, "Regla de segmento no válida")
+
+
+def reglas_validas(reglas: Any) -> list[dict[str, Any]]:
+    """Lista de reglas (se combinan con Y) o grupos {"grupo": "y"|"o", "reglas": [...]}."""
     if not isinstance(reglas, list):
         raise HTTPException(400, "Las reglas deben ser una lista")
+    cuenta = [0]
     for r in reglas:
-        if (
-            not isinstance(r, dict)
-            or r.get("campo") not in CAMPOS
-            or r.get("operador") not in ("es", "no_es", "contiene", "mayor_que", "menor_que")
-            or not isinstance(r.get("valor"), str)
-        ):
-            raise HTTPException(400, "Regla de segmento no válida")
+        _regla_valida(r, 1, cuenta)
     return reglas
+
+
+def reglas_planas(reglas: list[Any]) -> list[dict[str, Any]]:
+    """Todas las reglas simples, sin grupos (para resúmenes)."""
+    out: list[dict[str, Any]] = []
+    for r in reglas:
+        if isinstance(r, dict) and "grupo" in r:
+            out.extend(reglas_planas(r["reglas"]))
+        else:
+            out.append(r)
+    return out
 
 
 def numero(v: str) -> float:
@@ -68,32 +126,49 @@ def coincide(
 
 
 def coincide_indexado(
-    c: dict[str, Any], empresas: dict[str, dict[str, Any]], reglas: list[dict[str, str]]
+    c: dict[str, Any], empresas: dict[str, dict[str, Any]], reglas: list[Any]
 ) -> bool:
-    """Misma lógica que coincide() de src/lib/reglas.ts, con empresas indexadas por id."""
+    """Misma lógica que coincide() de src/lib/reglas.ts, con empresas indexadas por id.
+
+    La lista de primer nivel se combina con Y; un grupo combina sus reglas con Y u O.
+    """
     e = empresas.get(str(c["empresaId"]), {})
+    correo = str(c.get("correo") or "")
     campos = {
         **{k: e.get(k, "") for k in ("municipio", "sector", "tamano")},
         "puntaje": str(e.get("puntaje", {}).get("total", 0)),
         "etapa": c["etapa"],
         "origen": c["origen"],
         "baseLegal": "aprobada" if c["baseLegal"]["aprobadaPorAdmin"] else "pendiente",
+        "cargo": str(c.get("cargo") or ""),
+        "estadoCorreo": str(c.get("estadoCorreo") or ""),
+        "estadoCuenta": str(e.get("estadoCuenta") or ""),
+        "dominioCorreo": correo.split("@")[1].lower() if "@" in correo else "",
+        "hizoClic": "si" if c.get("hizoClic") else "no",
+        "respondio": "si" if c.get("respondio") else "no",
+        "recibioCorreo": "si" if c.get("recibioCorreo") else "no",
     }
-    for r in reglas:
+
+    def una(r: dict[str, Any]) -> bool:
+        if "grupo" in r:
+            resultados = (una(x) for x in r["reglas"])
+            return any(resultados) if r["grupo"] == "o" else all(resultados)
         if r["campo"] == "contactoIds":
-            if c["id"] not in r["valor"].split(","):
-                return False
-            continue
-        a, b, op = str(campos.get(r["campo"], "")), r["valor"], r["operador"]
-        if not {
-            "es": a == b,
-            "no_es": a != b,
+            dentro = bool(c["id"] in r["valor"].split(","))
+            return dentro if r["operador"] != "no_es" else not dentro
+        if r["campo"] == "lista":
+            dentro = bool(r["valor"] in c.get("listas", ()))
+            return dentro if r["operador"] != "no_es" else not dentro
+        a, b, op = str(campos.get(r["campo"], "")), str(r["valor"]), r["operador"]
+        return {
+            "es": a.lower() == b.lower() if r["campo"] == "dominioCorreo" else a == b,
+            "no_es": a.lower() != b.lower() if r["campo"] == "dominioCorreo" else a != b,
             "contiene": b.lower() in a.lower(),
             "mayor_que": numero(a) > numero(b),
             "menor_que": numero(a) < numero(b),
-        }[op]:
-            return False
-    return True
+        }[str(op)]
+
+    return all(una(r) for r in reglas)
 
 
 def validar_secuencia(s: dict[str, Any], prohibidas: list[str]) -> list[str]:

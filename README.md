@@ -75,6 +75,8 @@ Para desarrollar el frontend con Vite contra este backend, defina `APP_URL=http:
 
 ### Railway + Vercel
 
+**Migración `0009` y base de bajas (27 de noviembre de 2026):** ver `GUIA_RAILWAY.md` (comandos exactos) y `ENTREGA.md` (causa del fallo de envío y cambios). Pre-deploy command: `alembic upgrade head && python scripts/migrar_bajas.py`. Variables nuevas: `UNSUBSCRIBE_DATABASE_URL` (servicio `Postgres-3qtE`) y `BAJA_URL_PUBLICA` (opcional).
+
 `Dockerfile.railway` publica solo la API y el trabajador (`honcho start`, ver `GUIA_GEMINI.md`).
 
 **Migración `0007` (23 de noviembre de 2026), obligatoria:** añade la clave `descubrimiento` a `configuracion` (meta diaria apagada) y las tablas `eventos_trabajador` (bitácora de la Terminal; se borra sola a los 3 días) y `latidos_trabajador`. Sin ella fallan Descubrimiento y Terminal, y el trabajador no arranca. La aplica `alembic upgrade head` en el *Pre-deploy command*. Se puede bajar con `alembic downgrade 0006`. La meta empieza cada día a la hora `DESCUBRIMIENTO_HORA` (por defecto 8, hora de Colombia).
@@ -114,7 +116,7 @@ La sesión tiene una duración de 12 horas. La cookie es HttpOnly, SameSite=Lax 
 
 Active Gmail API, configure `GMAIL_CUENTA_ENVIO` y use el botón Conectar de Gmail. El flujo pide `gmail.send` y `gmail.readonly`, verifica la cuenta y cifra el refresh token con Fernet. No introduzca tokens directamente en el frontend.
 
-Para enviar una campaña: apruebe bases legales y segmento, pida la ruta de correos al agente con «Pedir una ruta de correos» en Propuestas (o «Pedir campaña al agente» en el segmento aprobado, que usa 3 correos y el objetivo por defecto), revísela correo por correo, edítela o recházela con un comentario si hace falta, apruébela, inscriba contactos elegibles y active la campaña. La aprobación por sí sola no inscribe ni envía. Los segmentos también se pueden pedir al agente («Pedir propuestas al agente» en Segmentos); el avance y el motivo de un fallo se ven en Propuestas.
+Para enviar una campaña: apruebe bases legales y la audiencia (segmento o lista), prepare la secuencia (a mano, con plantillas o con el agente) y pulse **Aprobar y programar**: en la misma operación se inscribe a cada destinatario elegible y se programa su primer correo. La pestaña **Envíos** de la secuencia muestra qué se programó, qué aceptó Gmail y qué falta (Gmail, trabajador, cuotas, elegibles). Se puede aprobar sin programar desmarcando la casilla. Los segmentos también se pueden pedir al agente («Pedir propuestas al agente» en Segmentos); el avance y el motivo de un fallo se ven en Propuestas.
 
 Un envío ambiguo queda en `enviando`, pausa campañas y requiere conciliación. El motor consulta Gmail por Message-ID y encabezado de idempotencia; si encuentra el mensaje, registra el resultado sin reenviarlo. Una ausencia en la búsqueda no se trata como prueba de no entrega. Revise `mensajes.ultimo_error` y la auditoría; no cambie estados manualmente para forzar un reenvío.
 

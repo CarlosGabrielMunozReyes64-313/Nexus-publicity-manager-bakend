@@ -1,5 +1,17 @@
 # Validación ejecutada — 22 de noviembre de 2026
 
+**Actualización del 27 de noviembre de 2026 (envíos al aprobar, listas, plantillas, importación y bajas; migración 0009 y base de bajas):** pytest 157 aprobadas sobre PostgreSQL 16. `pruebas/test_zzzzz_flujo_aceptacion.py` (4) recorre:
+- contacto y empresa en una transacción;
+- importación CSV y XLSX con correo repetido, celdas vacías y fórmula;
+- segmento Y/O que cambia con un atributo, frente a una lista estática que no cambia;
+- exportación .xlsx con teléfonos como texto y fórmulas neutralizadas;
+- plantilla → secuencia de 2 pasos → aprobación (doble clic: 1 sola) → 4 envíos con dos trabajadores a la vez y sin duplicar tras reaprobar y «reiniciar»;
+- baja desde el enlace con la base secundaria apagada: segundo paso cancelado, reimportar no reactiva y una campaña nueva la excluye;
+- base secundaria real migrada con `alembic_bajas.ini`: una sola fila aunque se repita la copia;
+- conciliación sin reenvío, supresión justo antes de entregar y diagnóstico sin Gmail, sin elegibles y sin trabajador.
+
+Contrato: 73 + 22 respuestas reales aprobadas por Zod. Ruff y mypy estricto sin errores. Ver ENTREGA.md.
+
 **Actualización del 23 de noviembre de 2026 (errores de Google y Gmail):** pytest 144 aprobadas. `pruebas/test_errores_google.py` (11) comprueba:
 - la explicación de cada tipo de error de Google, sin repetir el texto de Google;
 - que una API de Gmail deshabilitada se dice en la tarea, con un solo intento por revisión y una sola línea en la Terminal aunque se repita;

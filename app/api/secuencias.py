@@ -31,13 +31,17 @@ from app.dominio.reglas import (
 from app.esquemas.entradas import Secuencia
 from app.esquemas.serializar import serializar
 from app.motor.html import con_plantilla, preparar_pasos
-from app.motor.plantillas import render
+from app.motor.plantillas import render, variables_no_admitidas
 
 PRUEBAS_POR_DIA = 20
 SIN_CAMPANA = "La secuencia no tiene campaña asociada"
 ARCHIVADA = rutas_correo.SECUENCIA_ARCHIVADA
 SIN_CAMBIOS = "No hay cambios para aprobar: la versión aprobada ya está vigente"
 ESTADOS_CAMPANA = ("aprobada", "activa", "pausada", "finalizada")
+SOLO_SEGMENTO_IA = (
+    "La IA usa cifras agregadas de un segmento: con una lista como audiencia, edite los "
+    "correos a mano o elija un segmento"
+)
 VENTANA_SUGERIDA = {"dias": [2, 3, 4], "desde": "08:00", "hasta": "10:30"}
 
 
@@ -52,6 +56,8 @@ def huella(contenido: Any) -> str | None:
     s.pop("id", None)
     for p in s["pasos"]:
         p.pop("id", None)
+        # Solo referencia de origen: el contenido copiado es lo que cuenta.
+        p.pop("plantillaId", None)
     return repr(s)
 
 
@@ -214,6 +220,9 @@ def _extras(c: Conn, filas: list[Row]) -> list[Row]:
                 campana_id=cam["id"],
                 campana_estado=cam["estado"],
                 segmento_id=cam["segmento_id"],
+                lista_id=cam.get("lista_id"),
+                incorporar_nuevos=bool(cam.get("incorporar_nuevos")),
+                motivo_no_programada=cam.get("motivo_no_programada"),
             )
             if prop:
                 extra["version_borrador"] = prop["version"]
@@ -358,15 +367,18 @@ def revision(c: Conn, ident: str) -> dict[str, Any]:
     """Lista de verificación del borrador. aprobar() usa exactamente esta lógica."""
     seq, cam, p = asegurar(c, ident)
     s = borrador_de(c, seq, p)["contenido"]
-    seg = obtener(c, "segmentos", str(cam["segmento_id"]))
+    from app.motor import audiencia
+
+    seg = rutas_correo.audiencia_resumen(c, cam)
     marca = uno(c, "SELECT valor FROM configuracion WHERE clave='marca'")["valor"]
     limites = uno(c, "SELECT valor FROM configuracion WHERE clave='limites'")["valor"]
     bloqueos: list[str] = []
     errores = [correo(e) for e in validar_secuencia(s, marca["prohibidas"])]
+    errores.extend(variables_no_admitidas(s))
     advertencias = list(rutas_correo.advertencias_de(s))
     ventana_valida = False
-    if seg["estado"] != "aprobado":
-        bloqueos.append(rutas_correo.SEGMENTO_SIN_APROBAR)
+    if seg["bloqueo"]:
+        bloqueos.append(seg["bloqueo"])
     try:
         siguiente_ventana(datos.ahora(), s["ventanaEnvio"], limites["ventana"])
         ventana_valida = True
@@ -380,7 +392,13 @@ def revision(c: Conn, ident: str) -> dict[str, Any]:
     cambios = hay_cambios(s, ap, cam)
     if not cambios:
         bloqueos.append(SIN_CAMBIOS)
-    ids = rutas_correo.elegibles_ids(c, seg["reglas"])
+    candidatos = audiencia.candidatos(c, cam)
+    ids = audiencia.filtrar_elegibles(c, candidatos)
+    if not ids:
+        advertencias.append(
+            "La audiencia no tiene destinatarios elegibles: al aprobar no se programará "
+            "ningún envío hasta que haya contactos con base legal aprobada y correo válido"
+        )
     if ids:
         usadas = {
             m
@@ -400,13 +418,24 @@ def revision(c: Conn, ident: str) -> dict[str, Any]:
     gmail = uno(c, "SELECT estado FROM integraciones WHERE id='gmail'", (), False)
     gmail_ok = bool(gmail) and gmail["estado"] == "conectada"
     if not gmail_ok:
-        advertencias.append("Gmail no está conectado: podrá aprobar, pero no activar la campaña")
+        advertencias.append(
+            "Gmail no está conectado: podrá aprobar, pero los envíos no se programarán "
+            "hasta conectarlo"
+        )
     return {
         "puedeAprobar": not bloqueos and not errores,
         "bloqueos": bloqueos,
         "errores": errores,
         "advertencias": advertencias,
         "elegibles": len(ids),
+        "candidatos": len(candidatos),
+        "noElegibles": audiencia.motivos(c, [x for x in candidatos if x not in set(ids)]),
+        "audiencia": {
+            "tipo": seg["tipo"],
+            "id": seg["id"],
+            "nombre": seg["nombre"],
+            "incorporarNuevos": bool(cam.get("incorporar_nuevos")),
+        },
         "gmailConectado": gmail_ok,
         "duracionDiasHabiles": sum(x["esperaDiasHabiles"] for x in s["pasos"]),
         "hayCambiosSinAprobar": cambios,
@@ -425,9 +454,16 @@ def revision(c: Conn, ident: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------- aprobación
 
 
-def aprobar_secuencia(c: Conn, ident: str, admin: str) -> dict[str, Any]:
+def aprobar_secuencia(c: Conn, ident: str, admin: str, body: Any = None) -> dict[str, Any]:
+    """Aprueba la versión y, salvo «programar: false», programa los envíos en la misma
+    transacción: activa la campaña e inscribe a cada destinatario elegible con su primer
+    paso. Si no puede programar (Gmail, audiencia vacía, horario), la aprobación queda
+    guardada y la respuesta explica qué falta."""
     from app.api.campanas import aprobar, versionar
+    from app.motor import audiencia
 
+    programar_envios = not (isinstance(body, dict) and body.get("programar") is False)
+    # Serializa dos aprobaciones simultáneas (doble clic): la segunda ve «sin cambios».
     seq, cam, p = asegurar(c, ident, True)
     rev = revision(c, ident)
     if not rev["puedeAprobar"]:
@@ -439,7 +475,71 @@ def aprobar_secuencia(c: Conn, ident: str, admin: str) -> dict[str, Any]:
     p = obtener(c, "propuestas", str(p["id"]), True)
     aprobar(c, p, admin)
     auditar(c, "aprobar_secuencia", "secuencias", ident)
-    return {"ok": True, "version": p["version_actual"]}
+    out: dict[str, Any] = {"ok": True, "version": p["version_actual"]}
+    if programar_envios:
+        out["programacion"] = audiencia.activar(c, str(cam["id"]), datos.ahora())
+    return out
+
+
+def programar_envios(c: Conn, ident: str) -> dict[str, Any]:
+    """POST /secuencias/:id/programar: programa (o vuelve a intentar programar) la
+    versión aprobada vigente. Idempotente: nunca duplica inscripciones ni mensajes."""
+    from app.motor import audiencia
+
+    cam = campana_de(c, ident, True)
+    if not cam:
+        raise HTTPException(409, SIN_CAMPANA)
+    if not cam.get("aprobacion_vigente_id"):
+        raise HTTPException(409, "Apruebe la secuencia antes de programar envíos")
+    r = audiencia.activar(c, str(cam["id"]), datos.ahora())
+    return {"ok": True, "programacion": r}
+
+
+def cambiar_audiencia(c: Conn, ident: str, body: Any) -> dict[str, Any]:
+    """PUT /secuencias/:id/audiencia {segmentoId | listaId, incorporarNuevos}.
+
+    Cambiar el segmento o la lista revoca la aprobación vigente (la audiencia es parte de
+    lo aprobado). Cambiar solo «incorporarNuevos» también, porque decide quién recibe.
+    """
+    body = body if isinstance(body, dict) else {}
+    seq, cam, _ = asegurar(c, ident, True)
+    if seq.get("archivada_en"):
+        raise HTTPException(409, ARCHIVADA)
+    seg_id = body.get("segmentoId") or None
+    lista_id = body.get("listaId") or None
+    if bool(seg_id) == bool(lista_id):
+        raise HTTPException(400, "Elija un segmento o una lista como audiencia")
+    if seg_id:
+        obtener(c, "segmentos", str(seg_id))
+    else:
+        lista = obtener(c, "listas", str(lista_id))
+        if lista["archivada_en"]:
+            raise HTTPException(409, "La lista de envío está archivada")
+    nuevos = bool(body.get("incorporarNuevos", cam.get("incorporar_nuevos")))
+    cambios = (
+        str(cam.get("segmento_id") or "") != str(seg_id or "")
+        or str(cam.get("lista_id") or "") != str(lista_id or "")
+        or bool(cam.get("incorporar_nuevos")) != nuevos
+    )
+    if not cambios:
+        return {"ok": True, "revocada": False}
+    revocada = bool(cam.get("aprobacion_vigente_id"))
+    if revocada:
+        c.execute(
+            "SELECT revocar_aprobaciones(ARRAY[%s]::uuid[],%s)",
+            (cam["id"], "La audiencia de la campaña cambió"),
+        )
+    actualizar(
+        c,
+        "campanas",
+        str(cam["id"]),
+        {"segmento_id": seg_id, "lista_id": lista_id, "incorporar_nuevos": nuevos},
+    )
+    from app.api.campanas import revisar_pendientes
+
+    revisar_pendientes(c)
+    auditar(c, "cambiar_audiencia", "secuencias", ident)
+    return {"ok": True, "revocada": revocada}
 
 
 def reanudar(c: Conn, ident: str, admin: str) -> dict[str, Any]:
@@ -556,7 +656,9 @@ def _insertar_secuencia(c: Conn, s: dict[str, Any], con_pasos: bool) -> Row:
     return seq
 
 
-def _crear(c: Conn, s: dict[str, Any], segmento_id: Any, nombre_campana: str) -> str:
+def _crear(
+    c: Conn, s: dict[str, Any], segmento_id: Any, nombre_campana: str, lista_id: Any = None
+) -> str:
     from app.api.campanas import nueva_propuesta
 
     marca = uno(c, "SELECT valor FROM configuracion WHERE clave='marca'")["valor"]
@@ -569,6 +671,7 @@ def _crear(c: Conn, s: dict[str, Any], segmento_id: Any, nombre_campana: str) ->
         {
             "nombre": nombre_campana,
             "segmento_id": segmento_id,
+            "lista_id": lista_id,
             "secuencia_id": seq["id"],
             "estado": "borrador",
         },
@@ -596,11 +699,18 @@ def nueva(c: Conn, body: Any) -> dict[str, Any]:
         raise HTTPException(400, "El objetivo requiere entre 5 y 200 caracteres")
     if not 3 <= len(llamada) <= 200:
         raise HTTPException(400, "La llamada a la acción requiere entre 3 y 200 caracteres")
-    if not body.get("segmentoId"):
-        raise HTTPException(400, "Elija un segmento")
-    seg = obtener(c, "segmentos", str(body["segmentoId"]))
-    if seg["estado"] != "aprobado":
-        raise HTTPException(409, rutas_correo.SEGMENTO_SIN_APROBAR)
+    lista = None
+    seg = None
+    if body.get("listaId"):
+        lista = obtener(c, "listas", str(body["listaId"]))
+        if lista["archivada_en"]:
+            raise HTTPException(409, "La lista de envío está archivada")
+    elif not body.get("segmentoId"):
+        raise HTTPException(400, "Elija un segmento o una lista")
+    else:
+        seg = obtener(c, "segmentos", str(body["segmentoId"]))
+        if seg["estado"] != "aprobado":
+            raise HTTPException(409, rutas_correo.SEGMENTO_SIN_APROBAR)
     limites = uno(c, "SELECT valor FROM configuracion WHERE clave='limites'")["valor"]
     ventana = (
         VENTANA_SUGERIDA
@@ -630,7 +740,9 @@ def nueva(c: Conn, body: Any) -> dict[str, Any]:
             }
         ],
     }
-    ident = _crear(c, s, seg["id"], nombre)
+    ident = _crear(c, s, seg["id"] if seg else None, nombre, lista["id"] if lista else None)
+    if body.get("incorporarNuevos"):
+        c.execute("UPDATE campanas SET incorporar_nuevos=true WHERE secuencia_id=%s", (ident,))
     auditar(c, "crear_secuencia", "secuencias", ident)
     return {"ok": True, "id": ident}
 
@@ -641,7 +753,9 @@ def duplicar(c: Conn, ident: str) -> dict[str, Any]:
     s = {k: v for k, v in s.items() if k not in ("id", "notasAgente")}
     s["nombre"] = ("Copia de " + s["nombre"])[:200]
     s["pasos"] = [{k: v for k, v in x.items() if k != "id"} for x in s["pasos"]]
-    nuevo = _crear(c, s, cam["segmento_id"], ("Copia de " + cam["nombre"])[:200])
+    nuevo = _crear(
+        c, s, cam["segmento_id"], ("Copia de " + cam["nombre"])[:200], cam.get("lista_id")
+    )
     auditar(c, "duplicar_secuencia", "secuencias", nuevo)
     return {"ok": True, "id": nuevo}
 
@@ -669,6 +783,8 @@ def otra_version_ia(c: Conn, ident: str, body: Any, admin: str) -> dict[str, Any
         raise HTTPException(400, "El comentario requiere al menos 3 caracteres")
     proveedor_configurado()
     _, cam, p = asegurar(c, ident, True)
+    if not cam.get("segmento_id"):
+        raise HTTPException(409, SOLO_SEGMENTO_IA)
     if uno(
         c,
         "SELECT count(*) AS n FROM tareas WHERE tipo='revisar_campana' "
@@ -753,6 +869,8 @@ def mejorar(c: Conn, ident: str, orden_texto: str, body: Any) -> dict[str, Any]:
     seq, cam, _ = asegurar(c, ident)
     if seq.get("archivada_en"):
         raise HTTPException(409, ARCHIVADA)
+    if not cam.get("segmento_id"):
+        raise HTTPException(409, SOLO_SEGMENTO_IA)
     s = _contenido_para(c, ident, cuerpo)
     paso = next((p for p in s["pasos"] if p["orden"] == orden), None)
     if paso is None:

@@ -150,30 +150,66 @@ def secuencias(c: Conn, filas: list[Row]) -> list[Row]:
 
 
 def base_segmentos(c: Conn) -> tuple[dict[str, Row], list[Row]]:
-    """Datos mínimos para evaluar reglas de segmento: dos consultas en total."""
+    """Datos mínimos para evaluar reglas de segmento (consultas agrupadas, no por fila).
+
+    Incluye atributos guardados y comportamientos respaldados por eventos: clic humano
+    (no de escáner), respuesta recibida, correo enviado y pertenencia a listas activas.
+    """
     empresas_idx: dict[str, Row] = {}
     for e in todos(
         c,
-        """SELECT e.id,e.municipio,e.sector,e.tamano,p.total FROM empresas e
+        """SELECT e.id,e.municipio,e.sector,e.tamano,e.estado_cuenta,p.total FROM empresas e
         LEFT JOIN v_puntaje_actual p ON p.empresa_id=e.id WHERE e.fusionada_en_id IS NULL""",
     ):
         dato: Row = {k: e[k] for k in ("municipio", "sector", "tamano")}
+        dato["estadoCuenta"] = e["estado_cuenta"]
         if e["total"] is not None:
             dato["puntaje"] = {"total": e["total"]}
         empresas_idx[str(e["id"])] = dato
+    listas: dict[str, set[str]] = defaultdict(set)
+    for r in todos(
+        c,
+        """SELECT lm.contacto_id,lm.lista_id FROM lista_miembros lm
+        JOIN listas l ON l.id=lm.lista_id WHERE lm.activo AND l.archivada_en IS NULL""",
+    ):
+        listas[str(r["contacto_id"])].add(str(r["lista_id"]))
+    clics = {
+        str(r["cid"])
+        for r in todos(
+            c,
+            """SELECT DISTINCT coalesce(e.contacto_id,m.contacto_id) AS cid FROM eventos_correo e
+            LEFT JOIN mensajes m ON m.id=e.mensaje_id WHERE e.tipo='clic' AND NOT e.automatico""",
+        )
+        if r["cid"]
+    }
+    respondieron = {
+        str(r["contacto_id"]) for r in todos(c, "SELECT DISTINCT contacto_id FROM respuestas")
+    }
+    recibieron = {
+        str(r["contacto_id"])
+        for r in todos(c, "SELECT DISTINCT contacto_id FROM mensajes WHERE estado='enviado'")
+    }
     personas = [
         {
             "id": str(r["id"]),
             "empresaId": str(r["empresa_id"]),
             "etapa": r["etapa"],
             "origen": r["origen"],
+            "cargo": r["cargo"],
+            "correo": r["correo"],
+            "estadoCorreo": r["estado_correo"],
             "baseLegal": {"aprobadaPorAdmin": bool(r["aprobada"])},
+            "listas": listas.get(str(r["id"]), set()),
+            "hizoClic": str(r["id"]) in clics,
+            "respondio": str(r["id"]) in respondieron,
+            "recibioCorreo": str(r["id"]) in recibieron,
         }
         for r in todos(
             c,
-            """SELECT c.id,c.empresa_id,c.etapa,c.origen,coalesce(b.aprobada_por_admin,false) AS aprobada
+            """SELECT c.id,c.empresa_id,c.etapa,c.origen,c.cargo,c.correo::text AS correo,
+            c.estado_correo,coalesce(b.aprobada_por_admin,false) AS aprobada
             FROM contactos c LEFT JOIN v_base_legal_vigente b ON b.contacto_id=c.id
-            WHERE c.anonimizado_en IS NULL ORDER BY c.creado_en""",
+            WHERE c.anonimizado_en IS NULL ORDER BY c.creado_en, c.id""",
         )
     ]
     return empresas_idx, personas
@@ -181,14 +217,14 @@ def base_segmentos(c: Conn) -> tuple[dict[str, Row], list[Row]]:
 
 def ids_segmento(
     c: Conn,
-    reglas: list[dict[str, str]],
+    reglas: list[Any],
     base: tuple[dict[str, Row], list[Row]] | None = None,
 ) -> list[str]:
     empresas_idx, personas = base or base_segmentos(c)
     return [p["id"] for p in personas if coincide_indexado(p, empresas_idx, reglas)]
 
 
-def datos_segmento(c: Conn, reglas: list[dict[str, str]]) -> list[Row]:
+def datos_segmento(c: Conn, reglas: list[Any]) -> list[Row]:
     """Contactos completos que cumplen las reglas (para muestras y agentes)."""
     ids = ids_segmento(c, reglas)
     if not ids:
@@ -503,7 +539,40 @@ def armar_lista(c: Conn, recurso: str, filas: list[Row], detalle: bool = False) 
     if recurso == "oportunidades":
         return [{**r, "creada_en": r["creado_en"]} for r in filas]
     if recurso == "supresiones":
-        return [{**r, "fecha": r["creado_en"]} for r in filas]
+        sync = (
+            {
+                str(x["supresion_id"]): x
+                for x in todos(
+                    c,
+                    "SELECT supresion_id,estado,intentos,ultimo_error,sincronizada_en "
+                    "FROM sincronizacion_bajas WHERE supresion_id=ANY(%s::uuid[])",
+                    ([str(r["id"]) for r in filas],),
+                )
+            }
+            if filas
+            else {}
+        )
+        out_s = []
+        for r in filas:
+            x = sync.get(str(r["id"]))
+            out_s.append(
+                {
+                    **r,
+                    "fecha": r["creado_en"],
+                    # La baja ya es efectiva; esto solo dice si la copia secundaria existe.
+                    "sincronizacion": (
+                        {
+                            "estado": x["estado"],
+                            "intentos": x["intentos"],
+                            "ultimoError": x["ultimo_error"],
+                            "sincronizadaEn": x["sincronizada_en"],
+                        }
+                        if x
+                        else None
+                    ),
+                }
+            )
+        return out_s
     return filas
 
 
