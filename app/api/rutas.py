@@ -320,6 +320,10 @@ def mutacion(
         from app.api import plantillas
 
         return plantillas.modificar(c, p, method, body)
+    if ruta in ("eliminacion", "eliminacion/previa") and method == "POST":
+        from app.api import eliminacion
+
+        return (eliminacion.previa if ruta.endswith("previa") else eliminacion.eliminar)(c, body)
     if ruta == "imagenes" and method == "POST":
         from app.api.imagenes import subir
 

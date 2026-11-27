@@ -488,6 +488,8 @@ TABLAS = {
 # Filtros de los listados (compartidos por lista() y total()).
 FILTROS = {
     "empresas": " WHERE fusionada_en_id IS NULL",
+    # Los contactos eliminados quedan como filas anónimas solo para el historial.
+    "contactos": " WHERE anonimizado_en IS NULL",
     # Un par deja de tener sentido si una de las dos fichas ya se fusionó.
     "duplicados": """ d WHERE d.estado='pendiente'
         AND EXISTS (SELECT 1 FROM empresas a WHERE a.id=d.principal_id AND a.fusionada_en_id IS NULL)

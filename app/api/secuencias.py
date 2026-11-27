@@ -754,6 +754,20 @@ def nueva(c: Conn, body: Any) -> dict[str, Any]:
             }
         ],
     }
+    if body.get("plantillaId"):
+        # Primer correo a partir de una plantilla (copia: editable antes de aprobar).
+        from app.api.plantillas import para_paso
+
+        t = para_paso(c, str(body["plantillaId"]))
+        primero: dict[str, Any] = s["pasos"][0]  # type: ignore[index]
+        primero.update(
+            asunto=t["asunto"] or primero.get("asunto"),
+            cuerpo=t["cuerpo"],
+            formato=t["formato"],
+            cuerpoHtml=t["cuerpoHtml"],
+            plantillaId=t["plantillaId"],
+        )
+        s = preparar_pasos(s)
     ident = _crear(c, s, seg["id"] if seg else None, nombre, lista["id"] if lista else None)
     if body.get("incorporarNuevos"):
         c.execute("UPDATE campanas SET incorporar_nuevos=true WHERE secuencia_id=%s", (ident,))
