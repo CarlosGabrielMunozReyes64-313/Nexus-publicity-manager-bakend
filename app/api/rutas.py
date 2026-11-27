@@ -67,6 +67,10 @@ def leer(ruta: str, request: Request) -> Any:
                 result = plantillas.para_paso(c, ident)
             else:
                 raise HTTPException(404, "Ruta no encontrada")
+        elif ruta == "imagenes":
+            from app.api.imagenes import lista as lista_imagenes
+
+            result = lista_imagenes(c)
         elif ruta == "bajas/sincronizacion":
             from app.integraciones.bajas import resumen as resumen_bajas
 
@@ -316,6 +320,10 @@ def mutacion(
         from app.api import plantillas
 
         return plantillas.modificar(c, p, method, body)
+    if ruta == "imagenes" and method == "POST":
+        from app.api.imagenes import subir
+
+        return subir(c, body)
     if len(p) == 3 and p[:2] == ["contactos", "importacion"] and method == "POST":
         from app.api import importacion
 

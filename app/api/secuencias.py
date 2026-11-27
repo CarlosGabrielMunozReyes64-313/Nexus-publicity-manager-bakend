@@ -374,8 +374,22 @@ def revision(c: Conn, ident: str) -> dict[str, Any]:
     limites = uno(c, "SELECT valor FROM configuracion WHERE clave='limites'")["valor"]
     bloqueos: list[str] = []
     errores = [correo(e) for e in validar_secuencia(s, marca["prohibidas"])]
-    errores.extend(variables_no_admitidas(s))
+
     advertencias = list(rutas_correo.advertencias_de(s))
+    errores.extend(variables_no_admitidas(s))
+    from app.motor.html import es_diseno, problemas_diseno
+
+    for i, paso in enumerate(s.get("pasos", []), 1):
+        html_paso = paso.get("cuerpoHtml") if paso.get("formato") == "html" else None
+        errores.extend(f"Correo {i}: {x}" for x in problemas_diseno(html_paso))
+        if es_diseno(html_paso):
+            advertencias.append(
+                f"El correo {i} lleva diseño con imágenes: en un primer contacto Gmail suele "
+                "clasificarlo en Promociones; para el primer correo se recomienda texto simple"
+                if i == 1
+                else f"El correo {i} lleva imágenes: muchos programas las ocultan hasta que el "
+                "destinatario las permite; el texto debe entenderse sin ellas"
+            )
     ventana_valida = False
     if seg["bloqueo"]:
         bloqueos.append(seg["bloqueo"])

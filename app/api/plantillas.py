@@ -17,7 +17,7 @@ from app.api import datos, lecturas
 from app.config import config
 from app.db import Conn, Row, actualizar, auditar, insertar, obtener, todos, uno
 from app.esquemas.serializar import serializar
-from app.motor.html import con_plantilla, preparar_pasos
+from app.motor.html import con_plantilla, es_diseno, preparar_pasos, problemas_diseno
 from app.motor.plantillas import (
     VARIABLES_ADMITIDAS,
     con_pie_de_baja,
@@ -78,14 +78,19 @@ def _validar(body: Any) -> Row:
     errores = variables_no_admitidas(
         {"pasos": [{"asunto": asunto, "cuerpo": cuerpo, "cuerpoHtml": html, "variables": []}]}
     )
+    errores += [p[:1].upper() + p[1:] for p in problemas_diseno(html)]
     if errores:
         raise HTTPException(400, errores[0].replace("Correo 1: ", ""))
+    if len(cuerpo) > 3000:
+        raise HTTPException(400, "El texto del correo supera 3000 caracteres: acórtelo")
     return {
         "nombre": nombre,
         "asunto": asunto,
         "cuerpo": cuerpo,
         "formato": formato,
         "cuerpo_html": html,
+        "categoria": " ".join(str(body.get("categoria") or "Propia").split())[:60] or "Propia",
+        "descripcion": str(body.get("descripcion") or "")[:300],
     }
 
 
@@ -96,6 +101,7 @@ def armar(filas: list[Row]) -> list[Row]:
             "archivada": f["archivada_en"] is not None,
             "variables": variables_de(f["asunto"], f["cuerpo"], f["cuerpo_html"]),
             "sinBaja": "{{baja}}" not in f["cuerpo"],
+            "diseno": bool(f["cuerpo_html"] and es_diseno(f["cuerpo_html"])),
         }
         for f in filas
     ]
@@ -108,7 +114,7 @@ def lista(c: Conn, params: Any) -> list[Row]:
             c,
             "SELECT * FROM plantillas"
             + ("" if archivadas else " WHERE archivada_en IS NULL")
-            + " ORDER BY lower(nombre), id",
+            + " ORDER BY predeterminada DESC, lower(nombre), id",
         )
     )
 
@@ -192,6 +198,10 @@ def modificar(c: Conn, p: list[str], method: str, body: Any) -> Any:
     ident = p[1]
     accion = p[2] if len(p) > 2 else None
     t = obtener(c, "plantillas", ident, True)
+    if t["predeterminada"] and (method == "PUT" or accion in ("archivar", "restaurar")):
+        raise HTTPException(
+            409, "Las plantillas de NEXUS no se modifican: duplíquela para adaptarla"
+        )
     if accion is None and method == "PUT":
         if t["archivada_en"]:
             raise HTTPException(409, "Restaure la plantilla antes de editarla")
@@ -206,8 +216,13 @@ def modificar(c: Conn, p: list[str], method: str, body: Any) -> Any:
             c,
             "plantillas",
             {
-                **{k: t[k] for k in ("asunto", "cuerpo", "formato", "cuerpo_html")},
-                "nombre": ("Copia de " + t["nombre"])[:120],
+                **{k: t[k] for k in ("asunto", "cuerpo", "formato", "cuerpo_html", "descripcion")},
+                "categoria": "Propia",
+                "nombre": (
+                    (t["nombre"] + " (mi versión)")
+                    if t["predeterminada"]
+                    else ("Copia de " + t["nombre"])
+                )[:120],
             },
         )
         auditar(c, "duplicar_plantilla", "plantillas", str(n["id"]))

@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from itsdangerous import BadSignature, URLSafeSerializer
 from psycopg.types.json import Jsonb
 
@@ -129,6 +129,29 @@ def baja_post(token: str, request: Request) -> HTMLResponse:
     return pagina(
         "Baja confirmada" if nuevo else "Su baja ya estaba registrada",
         "<p>No recibirá nuevas comunicaciones de NEXUS Innovación en este correo.</p>",
+    )
+
+
+@router.api_route("/img/{ident}", methods=["GET", "HEAD"])
+def imagen(ident: str) -> Response:
+    """Imagen subida a NEXUS para los correos. Pública por diseño: la piden Gmail y los
+    demás programas de correo sin sesión. No registra aperturas."""
+    try:
+        UUID(ident)
+    except ValueError as exc:
+        raise HTTPException(404, "Imagen no encontrada") from exc
+    with transaccion("publico:imagen") as c:
+        r = uno(c, "SELECT tipo, datos FROM imagenes WHERE id=%s", (ident,), False)
+    if not r:
+        raise HTTPException(404, "Imagen no encontrada")
+    return Response(
+        bytes(r["datos"]),
+        media_type=r["tipo"],
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
+        },
     )
 
 

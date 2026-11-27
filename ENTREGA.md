@@ -105,3 +105,19 @@ No modifiqué nada en Railway: solo leí la configuración y los registros.
 - En la demostración (MSW), la importación solo lee .csv, la exportación no genera archivos y no se programan envíos.
 - Una fila sin correo se rechaza al importar: sin correo no se pueden evitar duplicados ni escribirle.
 - La pestaña Envíos lista hasta 500 destinatarios por secuencia. Los totales cuentan todos.
+
+## Segunda entrega (27-nov): plantillas con diseño e imágenes (migración 0010)
+
+- **Galería de NEXUS con 6 plantillas predeterminadas.** Una es de texto simple para el primer contacto. Las otras cinco tienen diseño: invitación al diagnóstico, caso de éxito, boletín, seguimiento y agradecimiento. Las predeterminadas no se editan: «Usar como base» crea una versión propia.
+- **Imágenes alojadas en NEXUS.** Se suben desde el editor (PNG, JPG o GIF, hasta 1,5 MB) y se publican sin sesión en `/img/<uuid>` (en Vercel, reescritura `/img/*`). Al enviar, su dirección se vuelve absoluta con `BAJA_URL_PUBLICA` o `APP_URL`. No hay píxel de apertura. También se aceptan imágenes de una dirección `https://`.
+- **Editor de diseño** (en Plantillas y en cada paso de una secuencia):
+  - cambiar imagen y texto alternativo;
+  - añadir imagen, botón y párrafo;
+  - insertar variables;
+  - editar el código HTML;
+  - vista previa en escritorio y celular, con el texto simple que viaja junto.
+- **Limpieza en el servidor.** Lista blanca de etiquetas de maquetación y de propiedades CSS. Se quitan `position`, `url()`, `javascript:` y las imágenes `http:` o `data:`.
+- **Al aprobar:**
+  - es error una imagen sin texto alternativo;
+  - es advertencia un diseño en el correo 1 (Gmail suele llevarlo a Promociones) y un diseño con imágenes en los demás correos (muchos programas las ocultan).
+- **Pruebas:** pytest 161 (4 nuevas en `pruebas/test_zzzzzz_plantillas_diseno.py`), Vitest 128, contrato 95 respuestas, Chrome con la API real.

@@ -85,6 +85,10 @@ class Config(BaseSettings):
     def url_baja(self, token: str) -> str:
         return (self.baja_url_publica or self.app_url) + "/baja/" + token
 
+    def url_publica(self, ruta: str) -> str:
+        """Dirección pública (sin sesión) para enlaces e imágenes de los correos."""
+        return (self.baja_url_publica or self.app_url) + ruta
+
 
 @lru_cache
 def config() -> Config:

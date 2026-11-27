@@ -74,7 +74,11 @@ def _html(
             return escape(texto_baja, quote=True).replace("\n", "<br>") + "<br>" + enlace_baja
         return escape(reemplazar(m), quote=True).replace("\n", "<br>")
 
-    return re.sub(r"\{\{(\w+)\}\}", valor, cuerpo)
+    cuerpo = re.sub(r"\{\{(\w+)\}\}", valor, cuerpo)
+    # Imágenes subidas a NEXUS: dirección absoluta y pública para el programa de correo.
+    from app.config import config
+
+    return cuerpo.replace('src="/img/', 'src="' + config().url_publica("/img/"))
 
 
 def render(

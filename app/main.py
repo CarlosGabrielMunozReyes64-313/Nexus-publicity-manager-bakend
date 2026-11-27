@@ -188,7 +188,7 @@ def crear_app() -> FastAPI:
 
     @app.get("/{ruta:path}")
     def spa(ruta: str) -> FileResponse:
-        if ruta.startswith(("api/", "r/", "baja/")):
+        if ruta.startswith(("api/", "r/", "baja/", "img/")):
             raise HTTPException(404, "Ruta no encontrada")
         root = carpeta_frontend()
         target = (root / ruta).resolve()
